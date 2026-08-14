@@ -47,6 +47,31 @@ corrupting a mixed-vector index.
 Set `VERTEX_PROJECT` to switch to real embeddings. Existing papers keep their
 old vectors and must be re-ingested.
 
+## Changing the embedding model
+
+Vectors from two different models are not comparable — cosine distance between
+them is a meaningless number that still sorts, so a mixed index returns
+confident nonsense rather than an error. Three things prevent that:
+
+* retrieval joins `papers` and serves only chunks whose `embedding_model`
+  matches the active embedder, so a stale paper returns nothing rather than
+  garbage;
+* `GET /papers` reports `needs_reindex` per paper, so staleness is visible
+  instead of looking like an empty result;
+* `scripts/reindex.py` re-embeds the stale ones.
+
+```bash
+PYTHONPATH=. python scripts/reindex.py --list        # what is stale
+PYTHONPATH=. python scripts/reindex.py --stale --dry-run
+PYTHONPATH=. python scripts/reindex.py --stale       # re-embed them
+PYTHONPATH=. python scripts/reindex.py --paper <uuid>
+```
+
+Idempotent: papers are committed one at a time, a failure rolls that paper back
+untouched rather than degrading a working one, and a second `--stale` run finds
+nothing. Re-indexing deliberately does not re-run per-reader concept
+canonicalization — it is a vector operation, not a learner-model one.
+
 ## Cloud provisioning
 
 ```bash

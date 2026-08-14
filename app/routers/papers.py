@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.db.base import get_db
 from app.db.models import Paper, UserPaperAccess
 from app.ingestion.parser import PdfCorruptError, PdfEncryptedError, probe_page_count
+from app.services.embeddings import get_embedder
 from app.services.storage import get_storage
 from app.services.tasks import run_canonicalization_job, run_ingestion_job
 
@@ -28,6 +29,10 @@ _READ_CHUNK = 1024 * 1024
 
 
 def _serialize(paper: Paper, *, nickname=None, last_opened_at=None) -> dict:
+    # A paper embedded with a different model is readable but not searchable:
+    # its vectors live in another space. Surface that rather than letting it
+    # look healthy while silently returning no evidence.
+    active_model = get_embedder().model_name
     return {
         "paper_id": str(paper.paper_id),
         "title": paper.title,
@@ -37,6 +42,11 @@ def _serialize(paper: Paper, *, nickname=None, last_opened_at=None) -> dict:
         "error_code": paper.error_code,
         "page_count": paper.page_count,
         "unreadable_pages": paper.unreadable_pages,
+        "embedding_model": paper.embedding_model,
+        "needs_reindex": (
+            paper.processing_status in ("ready", "partially_ready")
+            and paper.embedding_model != active_model
+        ),
         "last_opened_at": last_opened_at,
     }
 

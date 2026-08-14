@@ -17,11 +17,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import Float, select
+from sqlalchemy import Float, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db.models import Chunk, Section
+from app.db.models import Chunk, Paper, Section, UserPaperAccess
 from app.services.embeddings import Embedder, get_embedder
 
 logger = logging.getLogger(__name__)
@@ -103,13 +103,21 @@ class RetrievalService:
 
         # The predicates on is_indexable and embedding match the partial HNSW
         # index exactly, so the planner can use it.
+        #
+        # The join to papers enforces the vector-space guard: cosine distance
+        # between embeddings from two different models is a meaningless number
+        # that still sorts, so mixing them returns confident nonsense rather
+        # than an error. Scope construction filters for this too; this is the
+        # belt that holds if a caller builds a scope carelessly.
         statement = (
             select(Chunk, Section, similarity)
             .join(Section, Section.section_id == Chunk.section_id)
+            .join(Paper, Paper.paper_id == Chunk.paper_id)
             .where(
                 Chunk.paper_id.in_(scope),
                 Chunk.is_indexable.is_(True),
                 Chunk.embedding.isnot(None),
+                Paper.embedding_model == self._embedder.model_name,
             )
             .order_by(distance)
             # Over-fetch so the relevance floor and dedup have something to
@@ -175,15 +183,23 @@ class RetrievalService:
 
 
 async def authorized_paper_scope(
-    session: AsyncSession, user_id: uuid.UUID, paper_ids: Sequence[uuid.UUID] | None = None
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    paper_ids: Sequence[uuid.UUID] | None = None,
+    *,
+    embedding_model: str | None = None,
 ) -> list[uuid.UUID]:
     """The papers this user may currently read, optionally narrowed.
 
     Scope construction lives here rather than at the call site so there is one
     place where a revoked grant takes effect.
-    """
-    from app.db.models import UserPaperAccess
 
+    `embedding_model` additionally excludes papers embedded with a different
+    model. Those papers are readable — the exclusion is about vector-space
+    compatibility, not authorization — so a caller that wants to tell the user
+    "this needs re-indexing" should ask `stale_paper_scope` rather than
+    inferring it from the gap.
+    """
     statement = select(UserPaperAccess.paper_id).where(
         UserPaperAccess.user_id == user_id,
         UserPaperAccess.revoked_at.is_(None),
@@ -193,4 +209,33 @@ async def authorized_paper_scope(
             return []
         statement = statement.where(UserPaperAccess.paper_id.in_(list(paper_ids)))
 
+    if embedding_model is not None:
+        statement = statement.join(
+            Paper, Paper.paper_id == UserPaperAccess.paper_id
+        ).where(Paper.embedding_model == embedding_model)
+
+    return list((await session.scalars(statement)).all())
+
+
+async def stale_paper_scope(
+    session: AsyncSession, user_id: uuid.UUID, *, embedding_model: str
+) -> list[uuid.UUID]:
+    """This user's papers that were embedded with some other model.
+
+    A NULL `embedding_model` counts as stale: it predates the field being
+    recorded, so what produced those vectors is unknown, and unknown is not
+    the same as compatible.
+    """
+    statement = (
+        select(UserPaperAccess.paper_id)
+        .join(Paper, Paper.paper_id == UserPaperAccess.paper_id)
+        .where(
+            UserPaperAccess.user_id == user_id,
+            UserPaperAccess.revoked_at.is_(None),
+            or_(
+                Paper.embedding_model.is_(None),
+                Paper.embedding_model != embedding_model,
+            ),
+        )
+    )
     return list((await session.scalars(statement)).all())

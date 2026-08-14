@@ -5,7 +5,7 @@ pydantic                     # data validation
 pydantic-settings            # reads config from environment variables
 sqlalchemy                   # ORM — talks to Postgres
 asyncpg                      # Postgres driver, async
-psycopg                      # Postgres driver, sync — used only by Alembic migrations
+psycopg[binary]              # Postgres driver, sync — used only by Alembic migrations
 alembic                      # database migrations
 pgvector                     # Python bindings for the vector column type
 google-cloud-storage         # uploads PDFs to Cloud Storage

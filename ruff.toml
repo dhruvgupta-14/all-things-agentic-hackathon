@@ -1,0 +1,17 @@
+target-version = "py312"
+line-length = 100
+
+# Alembic owns the style of its generated migrations; reformatting them on
+# every autogenerate is churn with no reader.
+extend-exclude = ["alembic/versions", "venv"]
+
+[lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = [
+    # Depends()/Query() in argument defaults is how FastAPI declares
+    # dependencies. Flagging it would flag every endpoint in the codebase.
+    "B008",
+]
+
+[lint.per-file-ignores]
+"alembic/env.py" = ["E402"]  # config must be read before models import

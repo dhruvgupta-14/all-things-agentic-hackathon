@@ -14,10 +14,23 @@ class Settings(BaseSettings):
     db_host: str
     db_port: int
 
+    # Firebase project whose ID tokens this deployment accepts. Verification is
+    # refused outright when unset — an unpinned audience would accept tokens
+    # minted by any Firebase project.
+    firebase_project_id: str | None = None
+
     @property
     def database_url(self) -> str:
         return (
             f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
+
+    @property
+    def sync_database_url(self) -> str:
+        """Alembic runs its migrations synchronously, over psycopg."""
+        return (
+            f"postgresql+psycopg://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
 

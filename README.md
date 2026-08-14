@@ -33,6 +33,20 @@ Read the generated migration before applying it — autogenerate does not detect
 trigger or extension changes, and those must be hand-written with `op.execute`.
 `alembic check` fails when the models and the database have drifted apart.
 
+## Embeddings and retrieval
+
+With `VERTEX_PROJECT` unset, the system uses a deterministic **hashing
+embedder** so ingestion and retrieval work offline. It is a hashing-trick
+embedding, not random noise: texts sharing vocabulary genuinely score closer,
+which makes retrieval testable locally. It is *lexical only* — it cannot match
+"car" to "automobile" — so `RETRIEVAL_MIN_SIMILARITY` will need retuning once
+`gemini-embedding-001` is in play. The model used is recorded on
+`papers.embedding_model`, so a switch is detectable rather than silently
+corrupting a mixed-vector index.
+
+Set `VERTEX_PROJECT` to switch to real embeddings. Existing papers keep their
+old vectors and must be re-ingested.
+
 ## Checks
 
 ```bash
@@ -47,3 +61,9 @@ Requests to anything but `/health` need a Firebase ID token as
 `Authorization: Bearer <token>`. Set `FIREBASE_PROJECT_ID` in `.env`, or those
 routes return 503. Credentials come from Application Default Credentials — set
 `GOOGLE_APPLICATION_CREDENTIALS` locally; Cloud Run uses the metadata server.
+
+To work without Firebase credentials, set `AUTH_DEV_BYPASS_SUBJECT` to any
+string. Every request is then authenticated as that subject with no token, and
+a user row is provisioned on first use. This is honoured **only** when
+`APP_ENV=local`; set in any other environment the app returns 503 rather than
+accepting it, and a warning is logged on every bypassed request.

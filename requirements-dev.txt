@@ -3,3 +3,4 @@ pytest-asyncio      # lets pytest run your async test functions
 pytest-cov          # test coverage reporting
 ruff                # linter
 mypy                # type checker
+reportlab          # builds real PDFs for ingestion tests

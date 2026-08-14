@@ -1,6 +1,7 @@
 fastapi                      # the web framework
 uvicorn                      # the server that runs FastAPI
 python-multipart             # needed for file uploads (paper PDFs)
+pypdf                        # PDF text extraction (MIT; PyMuPDF is faster but AGPL)
 pydantic                     # data validation
 pydantic-settings            # reads config from environment variables
 sqlalchemy                   # ORM — talks to Postgres

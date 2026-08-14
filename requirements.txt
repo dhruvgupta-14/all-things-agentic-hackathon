@@ -1,0 +1,18 @@
+fastapi                      # the web framework
+uvicorn                      # the server that runs FastAPI
+python-multipart             # needed for file uploads (paper PDFs)
+pydantic                     # data validation
+pydantic-settings            # reads config from environment variables
+sqlalchemy                   # ORM — talks to Postgres
+asyncpg                      # Postgres driver, async
+psycopg                      # Postgres driver, sync — used only by Alembic migrations
+alembic                      # database migrations
+pgvector                     # Python bindings for the vector column type
+google-cloud-storage         # uploads PDFs to Cloud Storage
+google-cloud-tasks           # queues ingestion jobs
+firebase-admin               # verifies login tokens
+cloud-sql-python-connector   # secure connection from Cloud Run to Cloud SQL
+google-adk                   # the agent framework
+google-genai                 # talks to Gemini
+httpx                        # HTTP client (internal calls, testing)
+tenacity                     # retry logic for flaky external calls

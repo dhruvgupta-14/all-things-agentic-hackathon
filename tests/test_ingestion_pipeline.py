@@ -174,7 +174,11 @@ def no_background(monkeypatch):
     enqueued: list = []
     monkeypatch.setattr(
         "app.routers.papers.run_ingestion_job",
-        lambda paper_id: enqueued.append(paper_id),
+        lambda paper_id, user_id=None: enqueued.append(("ingest", paper_id)),
+    )
+    monkeypatch.setattr(
+        "app.routers.papers.run_canonicalization_job",
+        lambda paper_id, user_id: enqueued.append(("canonicalize", paper_id)),
     )
     return enqueued
 
@@ -248,7 +252,10 @@ async def test_identical_bytes_are_not_ingested_twice(
     second = await client.post("/papers", files={"file": ("b.pdf", data, "application/pdf")})
 
     assert first.json()["paper_id"] == second.json()["paper_id"]
-    assert len(no_background) == 1  # the second upload enqueued nothing
+
+    # Phases 1-5 run once for the bytes; the second upload only enqueues
+    # phase 6b, because concepts are per-reader and cannot be shared.
+    assert [kind for kind, _ in no_background] == ["ingest", "canonicalize"]
 
     papers = await db_session.scalar(select(func.count()).select_from(Paper))
     assert papers == 1

@@ -13,7 +13,6 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    ARRAY,
     REAL,
     Boolean,
     CheckConstraint,
@@ -27,7 +26,10 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+# Postgres-specific ARRAY: identical DDL to sqlalchemy.ARRAY, but carries the
+# array operators (&&, @>) the concept lookups rely on.
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

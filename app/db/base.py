@@ -8,7 +8,22 @@ from app.config import get_settings
 
 settings = get_settings()
 
-engine = create_async_engine(settings.database_url, echo=False)
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    connect_args={
+        "server_settings": {
+            # Postgres defaults this to 4.0, a spinning-disk figure. On SSD
+            # (Cloud SQL, and any modern local disk) it makes an index scan
+            # look ~4x more expensive than it is, and the planner answers
+            # vector queries with a sequential scan instead of the HNSW index.
+            # Measured on a 5 000-chunk corpus: 183ms seq scan vs 1ms HNSW.
+            # Set per-connection so the fix travels with the application
+            # rather than depending on server configuration being applied.
+            "random_page_cost": "1.1",
+        }
+    },
+)
 
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 

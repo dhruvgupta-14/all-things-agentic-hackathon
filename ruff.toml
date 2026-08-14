@@ -11,6 +11,9 @@ ignore = [
     # Depends()/Query() in argument defaults is how FastAPI declares
     # dependencies. Flagging it would flag every endpoint in the codebase.
     "B008",
+    # Rewriting a wrapped `"""word list""".split()` into a 40-element literal
+    # makes vocabularies unreadable and unreviewable in a diff.
+    "SIM905",
 ]
 
 [lint.per-file-ignores]

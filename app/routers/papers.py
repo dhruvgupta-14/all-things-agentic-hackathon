@@ -19,7 +19,7 @@ from app.db.base import get_db
 from app.db.models import Paper, UserPaperAccess
 from app.ingestion.parser import PdfCorruptError, PdfEncryptedError, probe_page_count
 from app.services.storage import get_storage
-from app.services.tasks import run_ingestion_job
+from app.services.tasks import run_canonicalization_job, run_ingestion_job
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
@@ -158,10 +158,14 @@ async def upload_paper(
     )
 
     if existing is not None:
-        # Same bytes, already parsed. Grant access and skip ingestion entirely
-        # — the chunks are paper-scoped and safely shared (ARCHITECTURE 8.4).
+        # Same bytes, already parsed. Grant access and skip phases 1-5 — the
+        # chunks are paper-scoped and safely shared (ARCHITECTURE 8.4). Only
+        # phase 6b still has to run, because concepts are per-reader.
         await _grant_access(session, principal.user_id, existing.paper_id, file.filename)
         await session.commit()
+        background_tasks.add_task(
+            run_canonicalization_job, existing.paper_id, principal.user_id
+        )
         return _serialize(existing)
 
     storage = get_storage()
@@ -180,7 +184,7 @@ async def upload_paper(
     await _grant_access(session, principal.user_id, paper.paper_id, file.filename)
     await session.commit()
 
-    background_tasks.add_task(run_ingestion_job, paper.paper_id)
+    background_tasks.add_task(run_ingestion_job, paper.paper_id, principal.user_id)
     return _serialize(paper)
 
 

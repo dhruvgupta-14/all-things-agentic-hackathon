@@ -18,6 +18,7 @@ stage.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import delete, select
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Chunk, Paper, Section
 from app.ingestion.chunker import chunk_sections
+from app.ingestion.concepts import ConceptService
 from app.ingestion.parser import (
     PdfCorruptError,
     PdfEncryptedError,
@@ -32,6 +34,7 @@ from app.ingestion.parser import (
     parse_pdf,
 )
 from app.ingestion.sectioner import detect_sections
+from app.services.analysis import Analyzer, ConceptCandidate, get_analyzer
 from app.services.embeddings import Embedder, get_embedder
 from app.services.storage import ObjectNotFoundError, Storage, get_storage
 
@@ -61,11 +64,51 @@ class IngestionResult:
     section_count: int
     chunk_count: int
     unreadable_pages: list[int]
+    concepts_linked: int = 0
 
 
 async def _set_phase(session: AsyncSession, paper: Paper, phase: str) -> None:
     paper.processing_phase = phase
     await session.flush()
+
+
+async def _canonicalize_for_user(
+    session: AsyncSession,
+    paper: Paper,
+    user_id: uuid.UUID,
+    embedder: Embedder,
+) -> int:
+    """Fold this paper's stored candidates into one reader's concept graph."""
+    stored = paper.concept_candidates or {}
+    candidates = [
+        ConceptCandidate.model_validate(raw) for raw in stored.get("concepts", [])
+    ]
+    if not candidates:
+        return 0
+
+    service = ConceptService(session, embedder=embedder)
+    result = await service.canonicalize(user_id, paper.paper_id, candidates)
+    return result.total
+
+
+async def canonicalize_existing_paper(
+    session: AsyncSession,
+    paper_id: uuid.UUID,
+    user_id: uuid.UUID,
+    *,
+    embedder: Embedder | None = None,
+) -> int:
+    """Phase 6b alone, for a reader who uploaded an already-ingested paper.
+
+    Phases 1-5 are paper-scoped and shared by content hash, so a second reader
+    of the same PDF skips straight to here (ARCHITECTURE 8.4).
+    """
+    paper = await session.scalar(select(Paper).where(Paper.paper_id == paper_id))
+    if paper is None or not paper.concept_candidates:
+        return 0
+    return await _canonicalize_for_user(
+        session, paper, user_id, embedder or get_embedder()
+    )
 
 
 async def ingest_paper(
@@ -74,6 +117,8 @@ async def ingest_paper(
     *,
     storage: Storage | None = None,
     embedder: Embedder | None = None,
+    analyzer: Analyzer | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> IngestionResult:
     """Run the ingestion job for one paper.
 
@@ -182,9 +227,36 @@ async def ingest_paper(
         paper.embedding_model = embedder.model_name
         await session.flush()
 
-        # Phase 6 (analyze + canonicalize) needs Gemini and is not wired up.
-        # It adds concept candidates; it does not gate retrieval, so a paper
-        # with vectors is genuinely ready to answer questions.
+        # --- Phase 6a: structural analysis, shared across readers ---------
+        await _set_phase(session, paper, "analyze")
+        analyzer = analyzer or get_analyzer()
+        if paper.concept_candidates is None:
+            try:
+                analysis = analyzer.analyze(
+                    paper.title,
+                    [(section.section_role, section.text) for section in detected],
+                )
+            except Exception as exc:
+                # Concepts enrich the experience; they do not gate retrieval.
+                # A model outage must not fail a paper that is already
+                # searchable, so this degrades rather than raising.
+                logger.warning("analysis unavailable, continuing without concepts: %s", exc)
+                analysis = None
+            if analysis is not None:
+                paper.concept_candidates = analysis.model_dump(mode="json")
+                paper.title = paper.title or (analysis.title or None)
+                paper.authors = analysis.authors or paper.authors
+                paper.year = analysis.year or paper.year
+                await session.flush()
+
+        # --- Phase 6b: canonicalize into this reader's own graph ----------
+        concepts_linked = 0
+        if user_id is not None and paper.concept_candidates:
+            await _set_phase(session, paper, "canonicalize")
+            concepts_linked = await _canonicalize_for_user(
+                session, paper, user_id, embedder
+            )
+
         paper.processing_status = "partially_ready" if document.is_partial else "ready"
         paper.processing_phase = None
         paper.error_code = None
@@ -205,6 +277,7 @@ async def ingest_paper(
             section_count=len(detected),
             chunk_count=len(chunks),
             unreadable_pages=document.unreadable_pages,
+            concepts_linked=concepts_linked,
         )
 
     except PermanentIngestionError as exc:

@@ -47,6 +47,37 @@ corrupting a mixed-vector index.
 Set `VERTEX_PROJECT` to switch to real embeddings. Existing papers keep their
 old vectors and must be re-ingested.
 
+## Cloud provisioning
+
+```bash
+./scripts/provision_gcp.sh --project <project> --dry-run   # review first
+./scripts/provision_gcp.sh --project <project>
+```
+
+Idempotent and non-destructive: every step checks before creating. It sets up
+the bucket (private, uniform access, public-access-prevention), the Cloud Tasks
+queue, the service account and least-privilege IAM, then prints the staging
+env block. It deliberately does not create Cloud SQL or download a
+service-account key — see the notes it prints.
+
+**When you create Cloud SQL, set the `random_page_cost` database flag to 1.1.**
+The default of 4.0 is a spinning-disk figure and makes the planner answer
+vector queries with a sequential scan instead of the HNSW index. Measured on a
+5 000-chunk corpus: 183ms sequential vs 1ms indexed. The app also sets this
+per-connection, so this is belt and braces.
+
+## Retrieval benchmark
+
+```bash
+PYTHONPATH=. python scripts/benchmark_retrieval.py --papers 50 --chunks-per-paper 100
+PYTHONPATH=. python scripts/benchmark_retrieval.py --cleanup
+```
+
+Seeds a synthetic corpus and reports whether each query shape uses HNSW, an
+exact index scan, or a sequential scan. Run it after any change to retrieval
+SQL or index definitions. The corpus is tagged so `--cleanup` removes exactly
+what it created.
+
 ## Checks
 
 ```bash

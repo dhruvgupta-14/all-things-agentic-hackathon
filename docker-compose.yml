@@ -2,6 +2,11 @@ services:
   db:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    # Matches the per-connection setting the app applies, so psql sessions and
+    # the retrieval benchmark see the same plans the application does. On
+    # Cloud SQL set the `random_page_cost` database flag to the same value.
+    command: >
+      postgres -c random_page_cost=1.1
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}

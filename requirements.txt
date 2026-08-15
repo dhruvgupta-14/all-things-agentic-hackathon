@@ -1,7 +1,10 @@
 fastapi                      # the web framework
 uvicorn                      # the server that runs FastAPI
 python-multipart             # needed for file uploads (paper PDFs)
-pypdf                        # PDF text extraction (MIT; PyMuPDF is faster but AGPL)
+pymupdf                      # PDF parsing. AGPL-3.0 — a recorded project decision.
+                             # Chosen over text-only extractors because span-level
+                             # bbox/colour/size are required for reading order,
+                             # invisible-text stripping and heading detection.
 pydantic                     # data validation
 pydantic-settings            # reads config from environment variables
 sqlalchemy                   # ORM — talks to Postgres

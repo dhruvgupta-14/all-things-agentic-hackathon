@@ -153,3 +153,56 @@ def build_pdf(pages: list[str]) -> bytes:
 
     pdf.save()
     return buffer.getvalue()
+
+
+def build_pdf_with_hidden_text(visible: str, hidden: str) -> bytes:
+    """A PDF carrying text a human cannot see.
+
+    White-on-white is the classic prompt-injection vector for documents: the
+    reader sees a normal paper, the extractor sees the attacker's text.
+    """
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.pdfgen import canvas
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=LETTER)
+    _, height = LETTER
+
+    pdf.setFont("Helvetica", 11)
+    pdf.setFillColorRGB(0, 0, 0)
+    cursor = height - 72
+    for line in visible.split("\n"):
+        pdf.drawString(72, cursor, line[:110])
+        cursor -= 15
+
+    # Same page, white ink on the white background.
+    pdf.setFillColorRGB(1, 1, 1)
+    for line in hidden.split("\n"):
+        pdf.drawString(72, cursor, line[:110])
+        cursor -= 15
+
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+def build_two_column_pdf(left: list[str], right: list[str]) -> bytes:
+    """A two-column page, the layout that breaks naive reading order."""
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.pdfgen import canvas
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=LETTER)
+    _, height = LETTER
+    pdf.setFont("Helvetica", 10)
+    pdf.setFillColorRGB(0, 0, 0)
+
+    for x, column in ((60, left), (330, right)):
+        cursor = height - 90
+        for line in column:
+            pdf.drawString(x, cursor, line[:44])
+            cursor -= 13
+
+    pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()

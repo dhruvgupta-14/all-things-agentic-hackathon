@@ -153,6 +153,17 @@ async def ingest_paper(
         paper.page_count = document.page_count
         paper.extractable_text_ratio = document.extractable_text_ratio
         paper.unreadable_pages = document.unreadable_pages or None
+        # What the parser stripped, and any injection phrasing found inside it.
+        # Recorded for inspection; never acted on (ARCHITECTURE 13.1).
+        paper.security_findings = document.security_findings or None
+        if document.security_findings.get("injection_hits"):
+            logger.warning(
+                "injection phrasing found in hidden text",
+                extra={
+                    "paper_id": str(paper.paper_id),
+                    "hits": len(document.security_findings["injection_hits"]),
+                },
+            )
         if document.title and not paper.title:
             paper.title = document.title[:1000]
 

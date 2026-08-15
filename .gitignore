@@ -17,3 +17,9 @@ htmlcov/
 
 # local db data volume
 .pgdata/
+
+# uploaded PDFs — runtime artifacts, and third-party documents
+# that should not be redistributed through this repo
+.storage/
+
+

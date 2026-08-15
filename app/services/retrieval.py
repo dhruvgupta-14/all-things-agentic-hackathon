@@ -85,11 +85,16 @@ class RetrievalService:
         """
         settings = get_settings()
         top_k = top_k or settings.retrieval_top_k
-        floor = (
-            min_similarity
-            if min_similarity is not None
-            else settings.retrieval_min_similarity
-        )
+        # Precedence: explicit argument, then an operator override in config,
+        # then the floor that belongs to this embedder's vector space. Scores
+        # are not comparable between models, so the embedder's own default is
+        # the only one guaranteed to be meaningful.
+        if min_similarity is not None:
+            floor = min_similarity
+        elif settings.retrieval_min_similarity is not None:
+            floor = settings.retrieval_min_similarity
+        else:
+            floor = self._embedder.default_min_similarity
 
         if not paper_scope or not query.strip():
             return []

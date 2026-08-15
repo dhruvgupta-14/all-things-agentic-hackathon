@@ -391,3 +391,47 @@ async def test_requested_papers_are_intersected_with_grants(
     assert await authorized_paper_scope(db_session, user.user_id, [mine.paper_id]) == [
         mine.paper_id
     ]
+
+
+# --------------------------------------------------------------------------
+# Relevance floor precedence
+# --------------------------------------------------------------------------
+
+
+async def test_floor_falls_back_to_the_embedder_default(
+    db_session: AsyncSession, storage, embedder, settings_env
+):
+    """With no config override, the embedder's own vector space decides."""
+    settings_env(retrieval_min_similarity=None)
+    paper = await _ingest(db_session, storage, embedder, ATTENTION_PAPER)
+    service = RetrievalService(db_session, embedder=embedder)
+
+    # The stub's floor is 0.25; a query sharing no vocabulary must fall under it.
+    assert (
+        await service.retrieve(
+            "zebra husbandry sourdough baking", paper_scope=[paper.paper_id]
+        )
+        == []
+    )
+
+
+async def test_config_override_beats_the_embedder_default(
+    db_session: AsyncSession, storage, embedder, settings_env
+):
+    settings_env(retrieval_min_similarity="0.99")
+    paper = await _ingest(db_session, storage, embedder, ATTENTION_PAPER)
+    service = RetrievalService(db_session, embedder=embedder)
+
+    assert await service.retrieve("attention", paper_scope=[paper.paper_id]) == []
+
+
+async def test_explicit_argument_beats_everything(
+    db_session: AsyncSession, storage, embedder, settings_env
+):
+    settings_env(retrieval_min_similarity="0.99")
+    paper = await _ingest(db_session, storage, embedder, ATTENTION_PAPER)
+    service = RetrievalService(db_session, embedder=embedder)
+
+    assert await service.retrieve(
+        "attention", paper_scope=[paper.paper_id], min_similarity=0.0
+    )

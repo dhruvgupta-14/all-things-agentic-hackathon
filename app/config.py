@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,15 +35,39 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 30 * 1024 * 1024
     max_page_count: int = 200
 
-    # Vertex AI. Unset locally, which selects the deterministic hashing
-    # embedder instead of gemini-embedding-001.
+    # Gemini access. Two transports reach the same models:
+    #
+    #   gemini_api_key  Google AI Studio (https://aistudio.google.com/apikey).
+    #                   Free tier, no billing account. The development path.
+    #   vertex_project  Vertex AI via application default credentials. Needs a
+    #                   billing-enabled project. The deployment path.
+    #
+    # With both set, Vertex wins: a deployment that has been given a project
+    # should not silently keep using a developer's personal API key. With
+    # neither, the deterministic local stubs are used.
+    gemini_api_key: str | None = None
     vertex_project: str | None = None
     vertex_location: str = "us-central1"
 
-    # Retrieval tuning. The floor is deliberately conservative: returning
-    # nothing is a better failure than grounding an answer in a weak match.
+    # Retrieval tuning. Leave the floor unset: cosine scores are not comparable
+    # between embedding models, so each embedder carries the floor for its own
+    # vector space (0.25 for the lexical stub, 0.58 for gemini-embedding-001).
+    # Set this only to override both deliberately.
     retrieval_top_k: int = 8
-    retrieval_min_similarity: float = 0.25
+    retrieval_min_similarity: float | None = None
+
+    @field_validator("retrieval_min_similarity", mode="before")
+    @classmethod
+    def _blank_means_unset(cls, value: object) -> object:
+        """Treat `RETRIEVAL_MIN_SIMILARITY=` as "not set".
+
+        A blank line in `.env` arrives as an empty string, which is not a
+        float. Without this, copying `.env.example` verbatim crashes the app
+        at import time — the setting is optional, so blank must mean absent.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def dev_bypass_active(self) -> bool:

@@ -195,7 +195,18 @@ PAPER
 
 
 class GeminiAnalyzer:
-    def __init__(self, project: str, location: str) -> None:
+    """Reachable via an AI Studio API key or Vertex AI — the same model."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        project: str | None = None,
+        location: str | None = None,
+    ) -> None:
+        if not api_key and not project:
+            raise ValueError("GeminiAnalyzer needs either an api_key or a project")
+        self._api_key = api_key
         self._project = project
         self._location = location
         self._client = None
@@ -204,13 +215,20 @@ class GeminiAnalyzer:
     def model_name(self) -> str:
         return GEMINI_MODEL
 
+    @property
+    def transport(self) -> str:
+        return "vertex" if self._project else "ai-studio"
+
     def _get_client(self):
         if self._client is None:
             from google import genai
 
-            self._client = genai.Client(
-                vertexai=True, project=self._project, location=self._location
-            )
+            if self._project:
+                self._client = genai.Client(
+                    vertexai=True, project=self._project, location=self._location
+                )
+            else:
+                self._client = genai.Client(api_key=self._api_key)
         return self._client
 
     @retry(
@@ -258,7 +276,12 @@ class GeminiAnalyzer:
 
 def get_analyzer() -> Analyzer:
     settings = get_settings()
+    # Vertex first, for the same reason as the embedder.
     if settings.vertex_project:
-        return GeminiAnalyzer(settings.vertex_project, settings.vertex_location)
+        return GeminiAnalyzer(
+            project=settings.vertex_project, location=settings.vertex_location
+        )
+    if settings.gemini_api_key:
+        return GeminiAnalyzer(api_key=settings.gemini_api_key)
     logger.debug("using the local heuristic analyzer; concepts will be lexical")
     return HeuristicAnalyzer()

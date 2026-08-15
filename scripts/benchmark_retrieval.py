@@ -123,6 +123,20 @@ async def seed(papers: int, chunks_per_paper: int, seed_value: int) -> None:
 SEQ_SCAN_IS_SUSPICIOUS_ABOVE = 2000
 
 
+def _index_named_in(line: str) -> str | None:
+    """Pull the index name out of a plan node, if the node names one.
+
+    Postgres writes this two different ways — `Index Scan using <idx> on <tbl>`
+    but `Bitmap Index Scan on <idx>` — and which one appears depends on the
+    plan the planner picked, so both have to be handled.
+    """
+    if " Scan using " in line:
+        return line.split(" using ", 1)[1].split(" on ", 1)[0].strip()
+    if "Bitmap Index Scan on " in line:
+        return line.split("Bitmap Index Scan on ", 1)[1].split("  ", 1)[0].strip()
+    return None
+
+
 async def _explain(
     session, label: str, sql: str, params: dict, corpus_size: int = 0
 ) -> None:
@@ -144,11 +158,7 @@ async def _explain(
             verdict = "seq scan (correct at this corpus size)"
     else:
         scan = next(
-            (
-                line.split(" using ", 1)[1].split(" on ", 1)[0].strip()
-                for line in plan
-                if " Scan using " in line
-            ),
+            (name for name in (_index_named_in(line) for line in plan) if name),
             "unknown",
         )
         # An exact scan over a small, highly selective scope is the better

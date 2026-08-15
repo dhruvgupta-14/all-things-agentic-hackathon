@@ -72,14 +72,39 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
         app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def _offline_by_default(monkeypatch: pytest.MonkeyPatch):
+    """Keep the suite hermetic.
+
+    A developer with GEMINI_API_KEY in their `.env` would otherwise have every
+    test that reaches `get_embedder()` or `get_analyzer()` make real API calls
+    — burning quota, adding seconds per test, and making results depend on the
+    network. Tests that want a real backend set the variable themselves via
+    `settings_env`, which runs after this and wins.
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("VERTEX_PROJECT", "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def settings_env(monkeypatch: pytest.MonkeyPatch):
-    """Rewrite settings for one test, clearing the lru_cache on both sides."""
+    """Rewrite settings for one test, clearing the lru_cache on both sides.
+
+    `None` sets the variable to empty rather than deleting it. Deleting only
+    removes it from the process environment, and pydantic-settings would then
+    fall back to the value in `.env` — which would make the suite behave
+    differently depending on what the developer happens to have configured.
+    An empty string is falsy for every optional setting, and it overrides the
+    dotenv file.
+    """
 
     def _apply(**values: str | None) -> None:
         for key, value in values.items():
             if value is None:
-                monkeypatch.delenv(key.upper(), raising=False)
+                monkeypatch.setenv(key.upper(), "")
             else:
                 monkeypatch.setenv(key.upper(), value)
         get_settings.cache_clear()

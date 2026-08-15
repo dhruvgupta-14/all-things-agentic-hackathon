@@ -30,7 +30,8 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-flash-latest"
+# Pinned via settings; see Settings.gemini_model for why not an alias.
+GEMINI_MODEL = "gemini-3.5-flash"
 STUB_ANALYZER_NAME = "local-heuristic-v1"
 
 MAX_CANDIDATES = 20

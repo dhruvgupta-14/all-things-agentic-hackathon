@@ -24,17 +24,35 @@ from dataclasses import dataclass, field
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.db.models import Concept, ConceptRelationship
+from app.services.adjudication import Adjudicator, get_adjudicator
 from app.services.analysis import ConceptCandidate
 from app.services.embeddings import Embedder
 
 logger = logging.getLogger(__name__)
 
-# Above this cosine similarity two names are the same concept without asking.
-AUTO_MERGE_ABOVE = 0.92
-# Below this they are unrelated. Between the two is the adjudication band.
+# The ANN floor from §16.3 step 3. Below it, a candidate is a new concept at
+# zero model cost. Above it, the model decides — there is deliberately no
+# "similar enough to merge without asking" band.
+#
+# Measured with gemini-embedding-001, which is why:
+#     variational inference / variational autoencoder = 0.9263   MUST NOT merge
+#     evidence lower bound  / ELBO                    = 0.8595   MUST merge
+#
+# The pair that must stay separate scores *higher* than the pair that must
+# merge. No threshold separates them, so any auto-merge band silently collapses
+# adjacent concepts into one — which is the failure that destroys the concept
+# graph, and the one §16.3 exists to prevent. Recall comes from embeddings;
+# precision comes from the model; the two are not interchangeable.
 AUTO_DISTINCT_BELOW = 0.72
+
+# A merge is destructive and awkward to unpick, so it needs more certainty
+# than an edge does. Spike S-4 returned 0.95-1.00 on every correct "same"
+# verdict, so 0.85 is comfortably clear of the observed noise floor.
+MIN_MERGE_CONFIDENCE = 0.85
+MIN_EDGE_CONFIDENCE = 0.70
 
 
 def normalize_name(name: str) -> str:
@@ -55,9 +73,16 @@ class CanonicalizationResult:
 
 
 class ConceptService:
-    def __init__(self, session: AsyncSession, *, embedder: Embedder) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        embedder: Embedder,
+        adjudicator: Adjudicator | None = None,
+    ) -> None:
         self._session = session
         self._embedder = embedder
+        self._adjudicator = adjudicator or get_adjudicator()
 
     # -- recall ------------------------------------------------------------
 
@@ -168,6 +193,19 @@ class ConceptService:
         confidence: float,
     ) -> bool:
         """Create a prerequisite edge, ignoring one that already exists."""
+        return await self._link_typed(
+            user_id, source_id, target_id, "prerequisite_of", confidence
+        )
+
+    async def _link_typed(
+        self,
+        user_id: uuid.UUID,
+        source_id: uuid.UUID,
+        target_id: uuid.UUID,
+        relationship_type: str,
+        confidence: float,
+    ) -> bool:
+        """Create a typed edge, ignoring one that already exists."""
         if source_id == target_id:
             return False
 
@@ -177,7 +215,7 @@ class ConceptService:
                 user_id=user_id,
                 source_concept_id=source_id,
                 target_concept_id=target_id,
-                relationship_type="prerequisite_of",
+                relationship_type=relationship_type,
                 confidence=confidence,
                 discovery_method="model",
             )
@@ -208,23 +246,43 @@ class ConceptService:
         vectors = self._embedder.embed_batch([c.name for c in candidates])
         # Candidate name -> the concept id it resolved to, for prerequisites.
         resolved: dict[str, uuid.UUID] = {}
+        # (candidate name, existing concept id, verdict) from the ambiguous
+        # band, committed once both endpoints have ids.
+        proposed_edges: list[tuple[str, uuid.UUID, object]] = []
 
         for candidate, vector in zip(candidates, vectors, strict=True):
             existing = await self._exact_match(user_id, candidate)
 
             if existing is None:
                 nearest, similarity = await self._nearest(user_id, vector)
-                if nearest is not None and similarity >= AUTO_MERGE_ABOVE:
-                    existing = nearest
-                elif nearest is not None and similarity >= AUTO_DISTINCT_BELOW:
-                    # The adjudication band. Until the agent can be asked,
-                    # treat it as distinct: a wrong merge is destructive and
-                    # awkward to unpick, while a duplicate is merely untidy
-                    # and can be merged later via `merged_into_id`.
-                    logger.debug(
-                        "ambiguous concept match left distinct",
-                        extra={"name": candidate.name, "similarity": similarity},
+                if nearest is not None and similarity >= AUTO_DISTINCT_BELOW:
+                    # §16.3 step 4 — the ambiguous band, and the only place a
+                    # model is consulted. Embeddings put "variational
+                    # inference" and "variational autoencoder" close together;
+                    # cosine similarity cannot tell "same" from "adjacent",
+                    # and this is where that distinction gets made.
+                    verdict = await run_in_threadpool(
+                        self._adjudicator.adjudicate,
+                        candidate.name,
+                        nearest.canonical_name,
+                        candidate_description=candidate.description,
+                        existing_description=nearest.description,
                     )
+                    if (
+                        verdict.verdict == "same"
+                        and verdict.confidence >= MIN_MERGE_CONFIDENCE
+                    ):
+                        existing = nearest
+                    elif (
+                        verdict.verdict == "related"
+                        and verdict.confidence >= MIN_EDGE_CONFIDENCE
+                    ):
+                        # Stays a separate concept, but the connection is
+                        # worth keeping — resolved into an edge once both
+                        # sides have ids.
+                        proposed_edges.append(
+                            (candidate.name, nearest.concept_id, verdict)
+                        )
 
             if existing is not None:
                 if paper_id not in (existing.source_paper_ids or []):
@@ -248,7 +306,18 @@ class ConceptService:
             resolved[candidate.name] = concept_id
             (result.created if created else result.matched).append(concept_id)
 
-        # Relationships are created only once every concept has an id.
+        # Adjudicated "related" verdicts become typed edges.
+        for name, existing_id, verdict in proposed_edges:
+            source_id = resolved.get(name)
+            edge_type = verdict.typed_relationship()
+            if source_id is None or edge_type is None:
+                continue
+            if await self._link_typed(
+                user_id, source_id, existing_id, edge_type, verdict.confidence
+            ):
+                result.relationships_created += 1
+
+        # Prerequisite edges are created only once every concept has an id.
         for candidate in candidates:
             target = resolved.get(candidate.name)
             if target is None:

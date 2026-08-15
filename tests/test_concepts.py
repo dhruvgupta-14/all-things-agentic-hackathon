@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Concept, ConceptRelationship, Paper, User
 from app.ingestion.concepts import ConceptService, normalize_name
 from app.ingestion.pipeline import canonicalize_existing_paper, ingest_paper
+from app.services.adjudication import Adjudication, ConservativeAdjudicator
 from app.services.analysis import (
     ConceptCandidate,
     HeuristicAnalyzer,
@@ -398,3 +399,147 @@ async def test_second_reader_canonicalizes_without_reingesting(
             .where(Concept.user_id == user.user_id)
         )
         assert owned == linked
+
+
+# --------------------------------------------------------------------------
+# Adjudication band (ARCHITECTURE 16.3 step 4)
+# --------------------------------------------------------------------------
+
+
+class _FixedEmbedder(HashingEmbedder):
+    """Every text embeds identically, so ANN similarity is always 1.0.
+
+    That forces every candidate into the adjudication band, which is what
+    these tests are about.
+    """
+
+    def _embed_one(self, text: str) -> list[float]:
+        return [1.0] + [0.0] * 767
+
+
+class _ScriptedAdjudicator:
+    """Returns a fixed verdict, and records that it was consulted."""
+
+    def __init__(self, verdict: str, confidence: float, rel: str | None = None) -> None:
+        self._adjudication = Adjudication(
+            verdict=verdict, confidence=confidence, relationship_type=rel
+        )
+        self.calls: list[tuple[str, str]] = []
+
+    @property
+    def model_name(self) -> str:
+        return "scripted"
+
+    def adjudicate(self, candidate_name, existing_name, **kwargs):
+        self.calls.append((candidate_name, existing_name))
+        return self._adjudication
+
+
+async def _two_rounds(session, user, paper, adjudicator):
+    service = ConceptService(
+        session, embedder=_FixedEmbedder(), adjudicator=adjudicator
+    )
+    await service.canonicalize(
+        user.user_id, paper.paper_id, [ConceptCandidate(name="Variational Inference")]
+    )
+    result = await service.canonicalize(
+        user.user_id, paper.paper_id, [ConceptCandidate(name="Variational Autoencoder")]
+    )
+    return result
+
+
+async def test_similar_names_are_adjudicated_not_auto_merged(
+    db_session: AsyncSession,
+):
+    """There is no "similar enough to merge without asking" band.
+
+    Measured with real embeddings, `variational inference` and `variational
+    autoencoder` score 0.9263 while `evidence lower bound` and `ELBO` score
+    0.8595 — the pair that must stay separate scores *higher* than the pair
+    that must merge. Any auto-merge threshold collapses adjacent concepts.
+    """
+    user = await _make_user(db_session)
+    paper = await _make_paper(db_session)
+    adjudicator = _ScriptedAdjudicator("related", 0.95, "component_of")
+
+    await _two_rounds(db_session, user, paper, adjudicator)
+
+    assert adjudicator.calls, "the model must be consulted above the ANN floor"
+
+
+async def test_related_verdict_keeps_concepts_separate_and_adds_an_edge(
+    db_session: AsyncSession,
+):
+    user = await _make_user(db_session)
+    paper = await _make_paper(db_session)
+
+    result = await _two_rounds(
+        db_session, user, paper, _ScriptedAdjudicator("related", 0.95, "component_of")
+    )
+
+    assert len(result.created) == 1, "a related concept is a new node, not a merge"
+    assert result.relationships_created == 1
+
+    total = await db_session.scalar(
+        select(func.count()).select_from(Concept).where(Concept.user_id == user.user_id)
+    )
+    assert total == 2
+
+    edge = await db_session.scalar(
+        select(ConceptRelationship).where(ConceptRelationship.user_id == user.user_id)
+    )
+    assert edge.relationship_type == "component_of"
+
+
+async def test_same_verdict_merges(db_session: AsyncSession):
+    user = await _make_user(db_session)
+    paper = await _make_paper(db_session)
+
+    result = await _two_rounds(
+        db_session, user, paper, _ScriptedAdjudicator("same", 0.99)
+    )
+
+    assert result.created == []
+    total = await db_session.scalar(
+        select(func.count()).select_from(Concept).where(Concept.user_id == user.user_id)
+    )
+    assert total == 1
+
+
+async def test_low_confidence_same_does_not_merge(db_session: AsyncSession):
+    """A merge is destructive, so it needs conviction, not a bare majority."""
+    user = await _make_user(db_session)
+    paper = await _make_paper(db_session)
+
+    result = await _two_rounds(
+        db_session, user, paper, _ScriptedAdjudicator("same", 0.5)
+    )
+
+    assert len(result.created) == 1
+    total = await db_session.scalar(
+        select(func.count()).select_from(Concept).where(Concept.user_id == user.user_id)
+    )
+    assert total == 2
+
+
+async def test_distinct_verdict_creates_no_edge(db_session: AsyncSession):
+    user = await _make_user(db_session)
+    paper = await _make_paper(db_session)
+
+    result = await _two_rounds(
+        db_session, user, paper, _ScriptedAdjudicator("distinct", 0.9)
+    )
+
+    assert len(result.created) == 1
+    assert result.relationships_created == 0
+
+
+async def test_offline_default_never_merges(db_session: AsyncSession):
+    """With no model configured, two names are two concepts."""
+    user = await _make_user(db_session)
+    paper = await _make_paper(db_session)
+
+    result = await _two_rounds(db_session, user, paper, ConservativeAdjudicator())
+
+    assert len(result.created) == 1
+    assert result.relationships_created == 0

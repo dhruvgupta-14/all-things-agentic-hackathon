@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     vertex_project: str | None = None
     vertex_location: str = "us-central1"
 
+    # Pinned deliberately, not `gemini-flash-latest`. HK-1 requires a
+    # Flash-class Gemini 3.5+, and an alias reports no resolvable version — it
+    # cannot be shown to satisfy the mandate, and it can move underneath a
+    # recorded demo. This resolves to an explicit dated build.
+    gemini_model: str = "gemini-3.5-flash"
+
     # Retrieval tuning. Leave the floor unset: cosine scores are not comparable
     # between embedding models, so each embedder carries the floor for its own
     # vector space (0.25 for the lexical stub, 0.58 for gemini-embedding-001).

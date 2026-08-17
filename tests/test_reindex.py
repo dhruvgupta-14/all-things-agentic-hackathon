@@ -248,7 +248,10 @@ async def test_reindexing_is_idempotent(db_session: AsyncSession, storage, embed
         second.section_count,
         second.chunk_count,
     )
-    assert await find_stale(db_session, "local-hashing-v1") == []
+    # Scoped to this paper: a global check would also see whatever a developer
+    # has ingested into their local database with a different embedder.
+    stale_ids = {p.paper_id for p in await find_stale(db_session, "local-hashing-v1")}
+    assert paper.paper_id not in stale_ids
 
 
 async def test_reindex_does_not_recanonicalize_concepts(

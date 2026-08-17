@@ -204,9 +204,11 @@ class GeminiAnalyzer:
         api_key: str | None = None,
         project: str | None = None,
         location: str | None = None,
+        model: str | None = None,
     ) -> None:
         if not api_key and not project:
             raise ValueError("GeminiAnalyzer needs either an api_key or a project")
+        self._model = model or GEMINI_MODEL
         self._api_key = api_key
         self._project = project
         self._location = location
@@ -214,7 +216,7 @@ class GeminiAnalyzer:
 
     @property
     def model_name(self) -> str:
-        return GEMINI_MODEL
+        return self._model
 
     @property
     def transport(self) -> str:
@@ -253,7 +255,7 @@ class GeminiAnalyzer:
 
         try:
             response = self._get_client().models.generate_content(
-                model=GEMINI_MODEL,
+                model=self._model,
                 contents=_PROMPT.format(limit=MAX_CANDIDATES, body=body),
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -280,9 +282,13 @@ def get_analyzer() -> Analyzer:
     # Vertex first, for the same reason as the embedder.
     if settings.vertex_project:
         return GeminiAnalyzer(
-            project=settings.vertex_project, location=settings.vertex_location
+            project=settings.vertex_project,
+            location=settings.vertex_location,
+            model=settings.gemini_model,
         )
     if settings.gemini_api_key:
-        return GeminiAnalyzer(api_key=settings.gemini_api_key)
+        return GeminiAnalyzer(
+            api_key=settings.gemini_api_key, model=settings.gemini_model
+        )
     logger.debug("using the local heuristic analyzer; concepts will be lexical")
     return HeuristicAnalyzer()

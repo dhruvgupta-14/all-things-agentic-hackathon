@@ -17,6 +17,7 @@ proposes; `ConceptService` commits.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -59,19 +60,35 @@ class Adjudication(BaseModel):
         return "co_occurs_with"
 
 
+@dataclass(slots=True)
+class ConceptPair:
+    """One ambiguous-band comparison awaiting a verdict."""
+
+    candidate_name: str
+    existing_name: str
+    candidate_description: str | None = None
+    existing_description: str | None = None
+
+
+class BatchAdjudication(BaseModel):
+    """Verdicts for a batch, positionally aligned with the input pairs."""
+
+    verdicts: list[Adjudication]
+
+
 class Adjudicator(Protocol):
     @property
     def model_name(self) -> str:
         ...
 
-    def adjudicate(
-        self,
-        candidate_name: str,
-        existing_name: str,
-        *,
-        candidate_description: str | None = None,
-        existing_description: str | None = None,
-    ) -> Adjudication:
+    def adjudicate_batch(self, pairs: list[ConceptPair]) -> list[Adjudication]:
+        """Judge every pair in one call.
+
+        Ingesting a paper produces up to `MAX_CANDIDATES` concepts, and asking
+        about each separately costs one request each — which exhausts a modest
+        quota on a single paper. The judgement is per-pair either way; only
+        the number of round trips differs.
+        """
         ...
 
 
@@ -87,19 +104,15 @@ class ConservativeAdjudicator:
     def model_name(self) -> str:
         return "conservative-no-merge"
 
-    def adjudicate(
-        self,
-        candidate_name: str,
-        existing_name: str,
-        *,
-        candidate_description: str | None = None,
-        existing_description: str | None = None,
-    ) -> Adjudication:
-        return Adjudication(
-            verdict="distinct",
-            confidence=0.0,
-            reason="no adjudicator configured; defaulting to distinct",
-        )
+    def adjudicate_batch(self, pairs: list[ConceptPair]) -> list[Adjudication]:
+        return [
+            Adjudication(
+                verdict="distinct",
+                confidence=0.0,
+                reason="no adjudicator configured; defaulting to distinct",
+            )
+            for _ in pairs
+        ]
 
 
 _PROMPT = """You are deciding whether two technical concept names, taken from
@@ -120,11 +133,11 @@ Answer with exactly one verdict:
 Prefer "related" over "same" when uncertain. Merging two different ideas
 destroys information; keeping two names for one idea is a minor untidiness.
 
-CONCEPT A: {candidate}
-{candidate_description}
+Return one verdict per numbered pair, in the same order, and exactly as many
+verdicts as there are pairs.
 
-CONCEPT B: {existing}
-{existing_description}
+PAIRS
+{pairs}
 """
 
 
@@ -170,25 +183,24 @@ class GeminiAdjudicator:
     @retry(
         retry=retry_if_exception_type(AdjudicationUnavailable),
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
         reraise=True,
     )
-    def adjudicate(
-        self,
-        candidate_name: str,
-        existing_name: str,
-        *,
-        candidate_description: str | None = None,
-        existing_description: str | None = None,
-    ) -> Adjudication:
+    def adjudicate_batch(self, pairs: list[ConceptPair]) -> list[Adjudication]:
         from google.genai import types
 
+        if not pairs:
+            return []
+
+        rendered = "\n\n".join(
+            f"{index}. A: {pair.candidate_name}"
+            f"\n   A means: {pair.candidate_description or '(no description)'}"
+            f"\n   B: {pair.existing_name}"
+            f"\n   B means: {pair.existing_description or '(no description)'}"
+            for index, pair in enumerate(pairs, start=1)
+        )
         prompt = _PROMPT.format(
-            relationship_types=", ".join(RELATIONSHIP_TYPE),
-            candidate=candidate_name,
-            existing=existing_name,
-            candidate_description=candidate_description or "(no description)",
-            existing_description=existing_description or "(no description)",
+            relationship_types=", ".join(RELATIONSHIP_TYPE), pairs=rendered
         )
 
         try:
@@ -197,7 +209,7 @@ class GeminiAdjudicator:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=Adjudication,
+                    response_schema=BatchAdjudication,
                     # Identity decisions must not vary run to run: the same
                     # pair has to resolve the same way every time, or the
                     # graph is not reproducible.
@@ -211,7 +223,14 @@ class GeminiAdjudicator:
         if parsed is None:
             raise AdjudicationUnavailable("model returned no parseable verdict")
 
-        return Adjudication.model_validate(parsed, from_attributes=True)
+        batch = BatchAdjudication.model_validate(parsed, from_attributes=True)
+        if len(batch.verdicts) != len(pairs):
+            # A misaligned batch would attach verdicts to the wrong pairs and
+            # merge the wrong concepts. Refuse rather than guess the mapping.
+            raise AdjudicationUnavailable(
+                f"asked about {len(pairs)} pairs, received {len(batch.verdicts)} verdicts"
+            )
+        return batch.verdicts
 
 
 def get_adjudicator() -> Adjudicator:

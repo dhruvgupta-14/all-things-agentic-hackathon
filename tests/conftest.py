@@ -8,6 +8,7 @@ real — the rollback still wins.
 """
 
 import io
+import uuid
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -24,8 +25,6 @@ from sqlalchemy.pool import NullPool
 from app.config import get_settings
 from app.db.base import get_db
 from app.main import app
-
-DEV_SUBJECT = "local-dev-user"
 
 
 @pytest_asyncio.fixture
@@ -46,6 +45,46 @@ async def db_connection() -> AsyncGenerator[AsyncConnection, None]:
         await engine.dispose()
 
 
+async def _seed_decoy_data(session: AsyncSession) -> None:
+    """Put data in the database that no test owns.
+
+    A test that queries global state — `count(*) FROM papers`, or "the only
+    concept" — passes by accident on an empty database and breaks the moment
+    anyone ingests a real paper locally. Rather than police that by review,
+    every test starts with rows it does not own, so a global query is wrong
+    immediately and visibly instead of months later.
+
+    This lives inside the test's transaction and rolls back with it.
+    """
+    from app.db.models import Concept, Paper, User
+
+    stranger = User(auth_subject=f"decoy-{uuid.uuid4()}")
+    session.add(stranger)
+    await session.flush()
+
+    # Deliberately never granted to the test user, so anything that respects
+    # `user_paper_access` still sees nothing.
+    paper = Paper(
+        content_hash=uuid.uuid4().hex + uuid.uuid4().hex[:32],
+        storage_uri=f"file://decoy-{uuid.uuid4()}.pdf",
+        processing_status="ready",
+        title="decoy paper owned by nobody in this test",
+        embedding_model="some-other-model",
+    )
+    session.add(paper)
+    await session.flush()
+
+    session.add(
+        Concept(
+            user_id=stranger.user_id,
+            canonical_name="Decoy Concept",
+            normalized_name=f"decoy concept {uuid.uuid4()}",
+            source_paper_ids=[paper.paper_id],
+        )
+    )
+    await session.flush()
+
+
 @pytest_asyncio.fixture
 async def db_session(db_connection: AsyncConnection) -> AsyncGenerator[AsyncSession, None]:
     factory = async_sessionmaker(
@@ -54,6 +93,7 @@ async def db_session(db_connection: AsyncConnection) -> AsyncGenerator[AsyncSess
         join_transaction_mode="create_savepoint",
     )
     async with factory() as session:
+        await _seed_decoy_data(session)
         yield session
 
 
@@ -115,9 +155,17 @@ def settings_env(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def dev_auth(settings_env):
-    """Enable the local-development auth bypass for this test."""
-    settings_env(app_env="local", auth_dev_bypass_subject=DEV_SUBJECT)
-    return DEV_SUBJECT
+    """Enable the local-development auth bypass, as a subject unique to this test.
+
+    Deliberately *not* the `local-dev-user` a developer uses by hand. Sharing
+    that subject makes every test see whatever papers happen to be sitting in
+    the local database — so uploading a demo paper breaks the isolation suite,
+    which is both alarming and entirely spurious. A fresh subject per test
+    means each one starts with an empty account.
+    """
+    subject = f"test-{uuid.uuid4()}"
+    settings_env(app_env="local", auth_dev_bypass_subject=subject)
+    return subject
 
 
 @pytest.fixture

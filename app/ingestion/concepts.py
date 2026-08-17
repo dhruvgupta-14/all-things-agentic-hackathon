@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.db.models import Concept, ConceptRelationship
-from app.services.adjudication import Adjudicator, get_adjudicator
+from app.services.adjudication import Adjudicator, ConceptPair, get_adjudicator
 from app.services.analysis import ConceptCandidate
 from app.services.embeddings import Embedder
 
@@ -250,39 +250,75 @@ class ConceptService:
         # band, committed once both endpoints have ids.
         proposed_edges: list[tuple[str, uuid.UUID, object]] = []
 
-        for candidate, vector in zip(candidates, vectors, strict=True):
-            existing = await self._exact_match(user_id, candidate)
+        # --- pass 1: deterministic recall (§16.3 steps 1-3) ----------------
+        # Exact match settles the common case at zero model cost. What is left
+        # above the ANN floor is the ambiguous band, gathered here so the whole
+        # paper costs one adjudication call rather than one per concept.
+        matched_exactly: dict[int, Concept] = {}
+        ambiguous: list[tuple[int, Concept]] = []
 
-            if existing is None:
-                nearest, similarity = await self._nearest(user_id, vector)
-                if nearest is not None and similarity >= AUTO_DISTINCT_BELOW:
-                    # §16.3 step 4 — the ambiguous band, and the only place a
-                    # model is consulted. Embeddings put "variational
-                    # inference" and "variational autoencoder" close together;
-                    # cosine similarity cannot tell "same" from "adjacent",
-                    # and this is where that distinction gets made.
-                    verdict = await run_in_threadpool(
-                        self._adjudicator.adjudicate,
-                        candidate.name,
-                        nearest.canonical_name,
-                        candidate_description=candidate.description,
-                        existing_description=nearest.description,
-                    )
-                    if (
-                        verdict.verdict == "same"
-                        and verdict.confidence >= MIN_MERGE_CONFIDENCE
-                    ):
-                        existing = nearest
-                    elif (
-                        verdict.verdict == "related"
-                        and verdict.confidence >= MIN_EDGE_CONFIDENCE
-                    ):
-                        # Stays a separate concept, but the connection is
-                        # worth keeping — resolved into an edge once both
-                        # sides have ids.
-                        proposed_edges.append(
-                            (candidate.name, nearest.concept_id, verdict)
-                        )
+        for index, (candidate, vector) in enumerate(
+            zip(candidates, vectors, strict=True)
+        ):
+            existing = await self._exact_match(user_id, candidate)
+            if existing is not None:
+                matched_exactly[index] = existing
+                continue
+
+            nearest, similarity = await self._nearest(user_id, vector)
+            if nearest is not None and similarity >= AUTO_DISTINCT_BELOW:
+                ambiguous.append((index, nearest))
+
+        # --- pass 2: model adjudication (§16.3 step 4), one call -----------
+        # Embeddings put "variational inference" and "variational autoencoder"
+        # close together; cosine similarity cannot tell "same" from "adjacent",
+        # and this is the only place that distinction gets made.
+        verdicts: dict[int, object] = {}
+        if ambiguous:
+            pairs = [
+                ConceptPair(
+                    candidate_name=candidates[index].name,
+                    existing_name=nearest.canonical_name,
+                    candidate_description=candidates[index].description,
+                    existing_description=nearest.description,
+                )
+                for index, nearest in ambiguous
+            ]
+            try:
+                judged = await run_in_threadpool(
+                    self._adjudicator.adjudicate_batch, pairs
+                )
+                verdicts = {
+                    index: verdict
+                    for (index, _), verdict in zip(ambiguous, judged, strict=True)
+                }
+            except Exception as exc:
+                # Falling back to "distinct" duplicates a concept at worst.
+                # Failing the ingest would lose a searchable paper over an
+                # enrichment step, which is the worse trade.
+                logger.warning("adjudication unavailable, treating as distinct: %s", exc)
+
+        # --- pass 3: deterministic commit ----------------------------------
+        for index, (candidate, vector) in enumerate(
+            zip(candidates, vectors, strict=True)
+        ):
+            existing = matched_exactly.get(index)
+            verdict = verdicts.get(index)
+
+            if existing is None and verdict is not None:
+                nearest = dict(ambiguous)[index]
+                if (
+                    verdict.verdict == "same"
+                    and verdict.confidence >= MIN_MERGE_CONFIDENCE
+                ):
+                    existing = nearest
+                elif (
+                    verdict.verdict == "related"
+                    and verdict.confidence >= MIN_EDGE_CONFIDENCE
+                ):
+                    # Stays a separate concept, but the connection is worth
+                    # keeping — resolved into an edge once both sides have ids.
+                    proposed_edges.append((candidate.name, nearest.concept_id, verdict))
 
             if existing is not None:
                 if paper_id not in (existing.source_paper_ids or []):

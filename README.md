@@ -106,10 +106,41 @@ what it created.
 ## Checks
 
 ```bash
-./venv/Scripts/python.exe -m ruff check app alembic
+./venv/Scripts/python.exe -m ruff check app scripts tests
 ./venv/Scripts/python.exe -m alembic check     # no model/schema drift
 ./venv/Scripts/python.exe -m pytest
 ```
+
+`pytest` runs **offline**. It never calls Gemini, never reads `demo_papers/`,
+and never assumes an empty database — every PDF it needs is generated in
+`tests/conftest.py`, and the model backends fall back to deterministic stubs.
+
+Test isolation is enforced structurally rather than by review. Each test
+transaction is seeded with rows it does not own (`_seed_decoy_data`), so a test
+that queries global state — `count(*) FROM papers`, "the only concept" — fails
+immediately instead of passing on an empty database and breaking the first time
+someone ingests a real paper. `tests/test_isolation.py` verifies that guard is
+in force, and each test gets a unique auth subject rather than sharing
+`local-dev-user` with a human developer.
+
+## Demo paper validation
+
+Separate from the test suite, because it needs the real PDFs, a real Gemini
+key with quota, and the persisted demo records:
+
+```bash
+PYTHONPATH=. python scripts/verify_demo_ingestion.py                    # check
+PYTHONPATH=. python scripts/verify_demo_ingestion.py --ingest           # ingest first
+PYTHONPATH=. python scripts/verify_demo_ingestion.py --rebuild-concepts # re-derive only
+```
+
+It verifies the ARCHITECTURE §12 step-0 precondition: after both papers are
+ingested and **before any question is asked**, the concept graph already
+connects them. Without that edge the cross-paper callback cannot fire.
+
+`--rebuild-concepts` exists because a transient model outage during ingest
+leaves the graph with no cross-paper edges, and a plain retry will not repair
+it — the concepts now exist, so exact-match short-circuits adjudication.
 
 ## Authentication
 

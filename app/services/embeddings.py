@@ -179,8 +179,12 @@ class GeminiEmbedder:
 
     @retry(
         retry=retry_if_exception_type(EmbeddingUnavailable),
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=1, min=2, max=20),
+        # The free tier caps embeddings at 100 requests per *minute*, and the
+        # API's own retry hint is around 45s. Backing off to 20s exhausts the
+        # attempts inside the window and fails a job that would have succeeded
+        # by simply waiting.
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=64),
         reraise=True,
     )
     def _embed_call(self, texts: list[str], task_type: str) -> list[list[float]]:

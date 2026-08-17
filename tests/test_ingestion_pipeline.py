@@ -1,5 +1,6 @@
 """The ingestion job end to end, and the upload boundary in front of it."""
 
+import hashlib
 import uuid
 
 import pytest
@@ -257,7 +258,12 @@ async def test_identical_bytes_are_not_ingested_twice(
     # phase 6b, because concepts are per-reader and cannot be shared.
     assert [kind for kind, _ in no_background] == ["ingest", "canonicalize"]
 
-    papers = await db_session.scalar(select(func.count()).select_from(Paper))
+    # Count only the bytes under test. A global count would also see whatever
+    # papers a developer has uploaded into their local database.
+    digest = hashlib.sha256(data).hexdigest()
+    papers = await db_session.scalar(
+        select(func.count()).select_from(Paper).where(Paper.content_hash == digest)
+    )
     assert papers == 1
 
 

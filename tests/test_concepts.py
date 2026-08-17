@@ -424,15 +424,17 @@ class _ScriptedAdjudicator:
         self._adjudication = Adjudication(
             verdict=verdict, confidence=confidence, relationship_type=rel
         )
+        self.batches: list[int] = []
         self.calls: list[tuple[str, str]] = []
 
     @property
     def model_name(self) -> str:
         return "scripted"
 
-    def adjudicate(self, candidate_name, existing_name, **kwargs):
-        self.calls.append((candidate_name, existing_name))
-        return self._adjudication
+    def adjudicate_batch(self, pairs):
+        self.batches.append(len(pairs))
+        self.calls.extend((p.candidate_name, p.existing_name) for p in pairs)
+        return [self._adjudication for _ in pairs]
 
 
 async def _two_rounds(session, user, paper, adjudicator):
@@ -543,3 +545,121 @@ async def test_offline_default_never_merges(db_session: AsyncSession):
 
     assert len(result.created) == 1
     assert result.relationships_created == 0
+
+
+async def test_a_paper_costs_one_adjudication_call(db_session: AsyncSession):
+    """Per-concept calls exhaust a day's free-tier quota on a single paper.
+
+    Measured against the live API: gemini-3.5-flash free tier allows 20
+    generate_content requests per day, and a paper yields up to 20 concepts.
+    One call per paper is what makes ingestion affordable at all.
+    """
+    user = await _make_user(db_session)
+    paper = await _make_paper(db_session)
+    adjudicator = _ScriptedAdjudicator("related", 0.95, "component_of")
+    service = ConceptService(
+        db_session, embedder=_FixedEmbedder(), adjudicator=adjudicator
+    )
+
+    await service.canonicalize(
+        user.user_id, paper.paper_id, [ConceptCandidate(name="Seed Concept")]
+    )
+    await service.canonicalize(
+        user.user_id,
+        paper.paper_id,
+        [ConceptCandidate(name=f"Concept {n}") for n in range(6)],
+    )
+
+    # The seed round has nothing to compare against, so it costs no call at
+    # all — that is §16.3's zero-model-cost path. The second round compares
+    # six candidates and spends exactly one request on all of them.
+    assert adjudicator.batches == [6]
+
+
+async def test_adjudication_failure_degrades_to_distinct(db_session: AsyncSession):
+    """A model outage must not fail a paper that is otherwise searchable."""
+
+    class _Broken:
+        model_name = "broken"
+
+        def adjudicate_batch(self, pairs):
+            raise RuntimeError("429 RESOURCE_EXHAUSTED")
+
+    user = await _make_user(db_session)
+    paper = await _make_paper(db_session)
+
+    result = await _two_rounds(db_session, user, paper, _Broken())
+
+    assert len(result.created) == 1, "the concept is still created, just unmerged"
+    assert result.relationships_created == 0
+
+
+# --------------------------------------------------------------------------
+# Cross-paper precondition (ARCHITECTURE 12, step 0)
+# --------------------------------------------------------------------------
+
+
+async def test_cross_paper_edge_exists_before_any_question(db_session: AsyncSession):
+    """The callback's precondition: the edge is written at ingest, not on demand.
+
+    Paper A is canonicalized first, then Paper B. A concept that appears only
+    in B must end up connected to a concept from A — otherwise the 1-hop
+    expansion in §12 step 3 has nothing to find and the callback cannot fire.
+    """
+    user = await _make_user(db_session)
+    paper_a = await _make_paper(db_session)
+    paper_b = await _make_paper(db_session)
+    adjudicator = _ScriptedAdjudicator("related", 0.90, "component_of")
+    service = ConceptService(
+        db_session, embedder=_FixedEmbedder(), adjudicator=adjudicator
+    )
+
+    await service.canonicalize(
+        user.user_id, paper_a.paper_id, [ConceptCandidate(name="Variational Lower Bound")]
+    )
+    result = await service.canonicalize(
+        user.user_id, paper_b.paper_id, [ConceptCandidate(name="Variance Schedule")]
+    )
+
+    assert result.relationships_created == 1
+
+    edge = await db_session.scalar(
+        select(ConceptRelationship).where(ConceptRelationship.user_id == user.user_id)
+    )
+    assert edge.relationship_type == "component_of"
+
+    source = await db_session.get(Concept, edge.source_concept_id)
+    target = await db_session.get(Concept, edge.target_concept_id)
+
+    # The edge genuinely spans the two papers.
+    assert paper_b.paper_id in source.source_paper_ids
+    assert paper_a.paper_id in target.source_paper_ids
+    assert paper_a.paper_id not in source.source_paper_ids
+
+
+async def test_merged_concept_carries_both_papers(db_session: AsyncSession):
+    """The other way the two papers connect: one shared concept.
+
+    When B's name for a concept merges into A's, the surviving node lists both
+    papers — which is what lets §12 step 7 expand scope to the prior paper.
+    """
+    user = await _make_user(db_session)
+    paper_a = await _make_paper(db_session)
+    paper_b = await _make_paper(db_session)
+    service = ConceptService(
+        db_session,
+        embedder=_FixedEmbedder(),
+        adjudicator=_ScriptedAdjudicator("same", 0.95),
+    )
+
+    await service.canonicalize(
+        user.user_id, paper_a.paper_id, [ConceptCandidate(name="Variational Lower Bound")]
+    )
+    await service.canonicalize(
+        user.user_id, paper_b.paper_id, [ConceptCandidate(name="Variational Bound Objective")]
+    )
+
+    concept = await db_session.scalar(
+        select(Concept).where(Concept.user_id == user.user_id)
+    )
+    assert sorted(concept.source_paper_ids) == sorted([paper_a.paper_id, paper_b.paper_id])

@@ -92,6 +92,9 @@ FEEDBACK_TYPE = (
     "style_preference",
 )
 GROUNDING_STATUS = ("grounded", "no_evidence", "degraded", "n/a")
+# Tool calls and their results are deliberately absent: they are working memory
+# for a single turn, and their provenance already lives in `turn_retrievals`.
+MESSAGE_ROLE = ("user", "assistant", "summary")
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -541,7 +544,9 @@ class Turn(Base):
         nullable=True,
     )
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
-    user_message: Mapped[str | None] = mapped_column(String(8000), nullable=True)
+    # Conversation content lives in `messages`, which is its single owner.
+    # A turn row is metadata, execution detail and provenance — nothing a
+    # reader said or was told.
     agent_action: Mapped[str | None] = mapped_column(String(64), nullable=True)
     explanation_style: Mapped[str | None] = mapped_column(Text, nullable=True)
     callback_concept_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -564,6 +569,63 @@ class Turn(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = _now()
+
+
+# --------------------------------------------------------------------------
+# messages — durable conversation history, owned by us
+# --------------------------------------------------------------------------
+class Message(Base):
+    """The single source of truth for what was said.
+
+    ADK is handed a throwaway in-memory session hydrated from these rows and
+    persists nothing itself, so history survives an instance being reclaimed
+    and does not depend on the framework's internal schema.
+
+    Immutable rather than strictly append-only: UPDATE is rejected by trigger,
+    because a transcript that can be rewritten is not a transcript. DELETE is
+    permitted, because both the retention sweep and `ON DELETE CASCADE` from a
+    deleted user need it.
+    """
+
+    __tablename__ = "messages"
+    __table_args__ = (
+        UniqueConstraint("session_id", "ordinal", name="uq_messages_session_id_ordinal"),
+        CheckConstraint(_in("role", MESSAGE_ROLE), name="role"),
+        CheckConstraint("ordinal >= 0", name="ordinal_non_negative"),
+        CheckConstraint(
+            "char_length(content) BETWEEN 1 AND 32000", name="content_length"
+        ),
+        CheckConstraint("token_count IS NULL OR token_count > 0", name="token_count_positive"),
+        Index("ix_messages_user_id_created_at", "user_id", text("created_at DESC")),
+        # The retention sweep's only query.
+        Index("ix_messages_created_at", "created_at"),
+    )
+
+    message_id: Mapped[uuid.UUID] = _pk()
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Denormalized deliberately, as on `turns`: every hot query filters by user.
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Provenance. Null until the turn row is written at the end of the turn,
+    # and null for summaries, which belong to no single turn.
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("turns.turn_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Stored so context budgeting never has to re-count an old message.
+    token_count: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     created_at: Mapped[datetime] = _now()
 
 
@@ -819,3 +881,12 @@ class Feedback(Base):
 
 
 APPEND_ONLY_TABLES = ("turns", "observations", "quiz_attempts")
+
+# `messages` is immutable rather than append-only — see the class docstring.
+# UPDATE is rejected; DELETE is required by retention and by user cascade.
+IMMUTABLE_TABLES = ("messages",)
+
+# Conversation history older than this is swept away. Deliberately a constant
+# rather than a setting: a retention window that varies per environment is a
+# privacy commitment nobody can state plainly.
+MESSAGE_RETENTION_DAYS = 30

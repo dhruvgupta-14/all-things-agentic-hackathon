@@ -123,6 +123,34 @@ someone ingests a real paper. `tests/test_isolation.py` verifies that guard is
 in force, and each test gets a unique auth subject rather than sharing
 `local-dev-user` with a human developer.
 
+## Conversation history
+
+PostgreSQL owns the transcript, not ADK. Each turn hydrates a **throwaway
+in-memory** ADK session from the `messages` table, runs the agent, and persists
+the new `user` and `assistant` rows itself. ADK never writes to the database.
+
+That buys three things: history survives an instance being reclaimed, the
+transcript outlives any decision to change agent framework, and the reset-by-
+replay demo script has real messages to replay.
+
+`messages` is the single owner of conversation content — `turns` holds metadata
+and provenance only. Rows are **immutable**: UPDATE is rejected by trigger,
+because a transcript that can be rewritten is not a transcript. DELETE stays
+permitted, because both the retention sweep and `ON DELETE CASCADE` from a
+deleted user need it.
+
+Tool calls and their results are deliberately **not** stored. They are working
+memory for one turn, and their provenance already lives in `turn_retrievals`.
+
+History older than **30 days** is deleted. The sweep runs on append, throttled
+to once an hour per process, so it needs no scheduler and costs nothing while
+the system is idle. For a long-idle deployment, or to see what would go:
+
+```bash
+PYTHONPATH=. python scripts/prune_messages.py --dry-run
+PYTHONPATH=. python scripts/prune_messages.py
+```
+
 ## Demo paper validation
 
 Separate from the test suite, because it needs the real PDFs, a real Gemini

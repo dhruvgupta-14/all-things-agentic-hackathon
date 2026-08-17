@@ -36,9 +36,9 @@ async def test_listing_papers_ignores_papers_this_user_was_not_granted(
     client: AsyncClient, dev_auth: str
 ):
     """Papers exist. None are this user's. The list is empty."""
-    await client.get("/me")
+    await client.get("/api/me")
 
-    assert (await client.get("/papers")).json() == []
+    assert (await client.get("/api/papers")).json() == []
 
 
 async def test_a_fresh_user_owns_no_concepts(db_session: AsyncSession):

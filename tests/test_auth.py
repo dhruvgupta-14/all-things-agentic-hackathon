@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import User
 
-PROTECTED_ROUTES = ["/me", "/papers"]
+PROTECTED_ROUTES = ["/api/me", "/api/papers"]
 
 
 async def test_health_needs_no_token(client: AsyncClient):
@@ -46,7 +46,7 @@ async def test_unconfigured_firebase_is_503_not_401(
 async def test_bypass_refused_outside_local(client: AsyncClient, settings_env):
     """A bypass subject set in a deployed environment fails closed."""
     settings_env(app_env="production", auth_dev_bypass_subject="someone")
-    response = await client.get("/me")
+    response = await client.get("/api/me")
     assert response.status_code == 503
     assert response.json()["detail"] == "Authentication is misconfigured on this deployment."
 
@@ -54,7 +54,7 @@ async def test_bypass_refused_outside_local(client: AsyncClient, settings_env):
 async def test_bypass_authenticates_and_provisions_user(
     client: AsyncClient, db_session: AsyncSession, dev_auth: str
 ):
-    response = await client.get("/me")
+    response = await client.get("/api/me")
     assert response.status_code == 200
 
     body = response.json()
@@ -73,8 +73,8 @@ async def test_repeat_login_reuses_the_same_user(
     client: AsyncClient, db_session: AsyncSession, dev_auth: str
 ):
     """Provisioning is once-per-subject, not once-per-request."""
-    first = await client.get("/me")
-    second = await client.get("/me")
+    first = await client.get("/api/me")
+    second = await client.get("/api/me")
 
     assert first.json()["user_id"] == second.json()["user_id"]
 
@@ -85,6 +85,6 @@ async def test_repeat_login_reuses_the_same_user(
 
 
 async def test_papers_is_empty_for_a_new_user(client: AsyncClient, dev_auth: str):
-    response = await client.get("/papers")
+    response = await client.get("/api/papers")
     assert response.status_code == 200
     assert response.json() == []

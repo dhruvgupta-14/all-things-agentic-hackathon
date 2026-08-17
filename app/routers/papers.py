@@ -22,7 +22,7 @@ from app.services.embeddings import get_embedder
 from app.services.storage import get_storage
 from app.services.tasks import run_canonicalization_job, run_ingestion_job
 
-router = APIRouter(prefix="/papers", tags=["papers"])
+router = APIRouter(prefix="/api/papers", tags=["papers"])
 
 PDF_MAGIC = b"%PDF-"
 _READ_CHUNK = 1024 * 1024

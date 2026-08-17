@@ -35,7 +35,7 @@ async def _current_user(session: AsyncSession, subject: str) -> User:
 async def test_granted_paper_is_listed(
     client: AsyncClient, db_session: AsyncSession, dev_auth: str
 ):
-    await client.get("/me")  # provision the caller
+    await client.get("/api/me")  # provision the caller
     user = await _current_user(db_session, dev_auth)
     paper = await _make_paper(db_session, "Attention Is All You Need")
 
@@ -46,7 +46,7 @@ async def test_granted_paper_is_listed(
     )
     await db_session.flush()
 
-    body = (await client.get("/papers")).json()
+    body = (await client.get("/api/papers")).json()
     assert [p["title"] for p in body] == ["Attention Is All You Need"]
     assert body[0]["nickname"] == "transformers"
     assert body[0]["processing_status"] == "ready"
@@ -56,35 +56,35 @@ async def test_ungranted_paper_is_invisible(
     client: AsyncClient, db_session: AsyncSession, dev_auth: str
 ):
     """The paper exists and is ready; no grant means it does not appear."""
-    await client.get("/me")
+    await client.get("/api/me")
     await _make_paper(db_session, "Someone Else's Paper")
 
-    assert (await client.get("/papers")).json() == []
+    assert (await client.get("/api/papers")).json() == []
 
 
 async def test_revoked_grant_hides_the_paper_immediately(
     client: AsyncClient, db_session: AsyncSession, dev_auth: str
 ):
-    await client.get("/me")
+    await client.get("/api/me")
     user = await _current_user(db_session, dev_auth)
     paper = await _make_paper(db_session, "Revoked Paper")
 
     grant = UserPaperAccess(user_id=user.user_id, paper_id=paper.paper_id)
     db_session.add(grant)
     await db_session.flush()
-    assert len((await client.get("/papers")).json()) == 1
+    assert len((await client.get("/api/papers")).json()) == 1
 
     grant.revoked_at = datetime.now(UTC)
     await db_session.flush()
 
     # Read-time authorization, so revocation needs no cache invalidation.
-    assert (await client.get("/papers")).json() == []
+    assert (await client.get("/api/papers")).json() == []
 
 
 async def test_another_users_grant_does_not_leak(
     client: AsyncClient, db_session: AsyncSession, dev_auth: str
 ):
-    await client.get("/me")
+    await client.get("/api/me")
     paper = await _make_paper(db_session, "Private To Someone Else")
 
     other = User(auth_subject=f"other-{uuid.uuid4()}")
@@ -93,4 +93,4 @@ async def test_another_users_grant_does_not_leak(
     db_session.add(UserPaperAccess(user_id=other.user_id, paper_id=paper.paper_id))
     await db_session.flush()
 
-    assert (await client.get("/papers")).json() == []
+    assert (await client.get("/api/papers")).json() == []

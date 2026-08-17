@@ -197,12 +197,12 @@ async def test_stale_scope_names_what_needs_reindexing(
 async def test_api_flags_a_paper_that_needs_reindexing(
     client: AsyncClient, db_session: AsyncSession, dev_auth, storage, embedder
 ):
-    await client.get("/me")
+    await client.get("/api/me")
     user = await db_session.scalar(select(User).where(User.auth_subject == dev_auth))
     current = await _ingest(db_session, storage, embedder, user)
     stale = await _ingest(db_session, storage, OtherModelEmbedder(), user)
 
-    by_id = {p["paper_id"]: p for p in (await client.get("/papers")).json()}
+    by_id = {p["paper_id"]: p for p in (await client.get("/api/papers")).json()}
 
     assert by_id[str(current.paper_id)]["needs_reindex"] is False
     assert by_id[str(stale.paper_id)]["needs_reindex"] is True

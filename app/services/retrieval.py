@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import Float, or_, select
+from sqlalchemy import true as sa_true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -76,12 +77,17 @@ class RetrievalService:
         paper_scope: Sequence[uuid.UUID],
         top_k: int | None = None,
         min_similarity: float | None = None,
+        section_role: str | None = None,
     ) -> list[RetrievedChunk]:
         """Return the most relevant chunks within `paper_scope`.
 
         `paper_scope` is the enumerated set of papers this user may read,
         already checked against `user_paper_access`. An empty scope returns
         nothing rather than falling back to an unfiltered search.
+
+        `section_role` narrows to one part of the paper. It is the one filter
+        the agent chooses (ARCHITECTURE 14.2) — it constrains *what* is
+        searched, never *whose* data, so it is safe in the model's hands.
         """
         settings = get_settings()
         top_k = top_k or settings.retrieval_top_k
@@ -125,6 +131,13 @@ class RetrievalService:
                 Paper.embedding_model == self._embedder.model_name,
             )
             .order_by(distance)
+            .where(
+                # A no-op when unset, so the query shape is unchanged for the
+                # common case and still matches the partial HNSW index.
+                Section.section_role == section_role
+                if section_role
+                else sa_true()
+            )
             # Over-fetch so the relevance floor and dedup have something to
             # cut into, rather than returning fewer than top_k after filtering.
             .limit(top_k * 3)

@@ -188,7 +188,7 @@ async def test_upload_accepts_a_pdf_and_enqueues_ingestion(
     client: AsyncClient, db_session: AsyncSession, dev_auth, storage_dir, no_background
 ):
     response = await client.post(
-        "/papers",
+        "/api/papers",
         files={"file": ("paper.pdf", build_pdf(PAPER_PAGES), "application/pdf")},
     )
 
@@ -199,7 +199,7 @@ async def test_upload_accepts_a_pdf_and_enqueues_ingestion(
     assert len(no_background) == 1
 
     # It is visible to the uploader straight away.
-    listed = (await client.get("/papers")).json()
+    listed = (await client.get("/api/papers")).json()
     assert [p["paper_id"] for p in listed] == [body["paper_id"]]
 
 
@@ -208,7 +208,7 @@ async def test_upload_rejects_non_pdf_by_sniffing_content(
 ):
     """The declared type is not trusted; the bytes are."""
     response = await client.post(
-        "/papers",
+        "/api/papers",
         files={"file": ("evil.pdf", b"MZ\x90\x00 this is an executable", "application/pdf")},
     )
     assert response.status_code == 415
@@ -218,7 +218,7 @@ async def test_upload_rejects_non_pdf_by_sniffing_content(
 async def test_upload_rejects_an_empty_file(
     client: AsyncClient, dev_auth, storage_dir, no_background
 ):
-    response = await client.post("/papers", files={"file": ("x.pdf", b"", "application/pdf")})
+    response = await client.post("/api/papers", files={"file": ("x.pdf", b"", "application/pdf")})
     assert response.status_code == 400
 
 
@@ -227,7 +227,7 @@ async def test_upload_enforces_the_size_cap(
 ):
     settings_env(max_upload_bytes="1024")
     response = await client.post(
-        "/papers", files={"file": ("big.pdf", build_pdf(PAPER_PAGES), "application/pdf")}
+        "/api/papers", files={"file": ("big.pdf", build_pdf(PAPER_PAGES), "application/pdf")}
     )
     assert response.status_code == 413
 
@@ -237,7 +237,7 @@ async def test_upload_enforces_the_page_cap(
 ):
     settings_env(max_page_count="2")
     response = await client.post(
-        "/papers", files={"file": ("long.pdf", build_pdf(PAPER_PAGES), "application/pdf")}
+        "/api/papers", files={"file": ("long.pdf", build_pdf(PAPER_PAGES), "application/pdf")}
     )
     assert response.status_code == 422
     assert "3 pages" in response.json()["detail"]
@@ -249,8 +249,8 @@ async def test_identical_bytes_are_not_ingested_twice(
     """Content hash is the idempotency key (ARCHITECTURE 8.3)."""
     data = build_pdf(PAPER_PAGES)
 
-    first = await client.post("/papers", files={"file": ("a.pdf", data, "application/pdf")})
-    second = await client.post("/papers", files={"file": ("b.pdf", data, "application/pdf")})
+    first = await client.post("/api/papers", files={"file": ("a.pdf", data, "application/pdf")})
+    second = await client.post("/api/papers", files={"file": ("b.pdf", data, "application/pdf")})
 
     assert first.json()["paper_id"] == second.json()["paper_id"]
 
@@ -272,7 +272,7 @@ async def test_upload_by_a_second_user_grants_access_without_reingesting(
 ):
     """Chunks are paper-scoped and shared; only the grant is per-user."""
     data = build_pdf(PAPER_PAGES)
-    first = await client.post("/papers", files={"file": ("a.pdf", data, "application/pdf")})
+    first = await client.post("/api/papers", files={"file": ("a.pdf", data, "application/pdf")})
     paper_id = uuid.UUID(first.json()["paper_id"])
 
     grants = await db_session.scalar(
@@ -290,7 +290,7 @@ async def test_get_paper_hides_unauthorized_ids_as_404(
     """A 403 would confirm the id is real to someone with no access."""
     paper = await _seed_paper(db_session, storage, PAPER_PAGES)
 
-    response = await client.get(f"/papers/{paper.paper_id}")
+    response = await client.get(f"/api/papers/{paper.paper_id}")
     assert response.status_code == 404
 
 
@@ -298,10 +298,10 @@ async def test_get_paper_reports_status_for_polling(
     client: AsyncClient, dev_auth, storage_dir, no_background
 ):
     created = await client.post(
-        "/papers", files={"file": ("p.pdf", build_pdf(PAPER_PAGES), "application/pdf")}
+        "/api/papers", files={"file": ("p.pdf", build_pdf(PAPER_PAGES), "application/pdf")}
     )
     paper_id = created.json()["paper_id"]
 
-    response = await client.get(f"/papers/{paper_id}")
+    response = await client.get(f"/api/papers/{paper_id}")
     assert response.status_code == 200
     assert response.json()["processing_status"] == "queued"

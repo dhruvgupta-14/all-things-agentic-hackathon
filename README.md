@@ -182,3 +182,48 @@ string. Every request is then authenticated as that subject with no token, and
 a user row is provisioned on first use. This is honoured **only** when
 `APP_ENV=local`; set in any other environment the app returns 503 rather than
 accepting it, and a warning is logged on every bypassed request.
+
+## Frontend
+
+A Vite + React SPA in [`frontend/`](frontend/). It talks to the API through
+Vite's dev proxy, so the browser stays same-origin and the backend needs no
+CORS middleware.
+
+```bash
+uvicorn app.main:app --reload --port 8000   # backend first
+cd frontend && npm install && npm run dev   # then http://localhost:5173
+```
+
+Scope is papers, sessions, chat and citations. The learner-memory, concept-graph
+and quiz views wait on agent tools 2–5; the SPA renders `memory_used` as nothing
+while that array is empty rather than showing a section that would imply memory
+was consulted.
+
+### Verifying it
+
+```bash
+npm run verify        # offline: markdown/citation pipeline, SSE framing, rendering
+npm run verify:live   # one real turn against a running backend (costs model quota)
+```
+
+`verify/stream.mjs` replays a real turn's wire text at every chunk size from one
+byte upward, because a frame straddling a network-chunk boundary is the failure
+mode that would silently drop an event. `verify/live.mjs` drives the SPA's own
+client and stream modules over the proxy and asserts the event order, the
+citation click-through, and that the durable transcript matches what was
+streamed.
+
+### Citations in the client
+
+Markers are rendered by a remark plugin that only rewrites markdown *text*
+nodes, so `x[1]` in code and `a_{[2]}` in mathematics stay literal. A pill is
+clickable only once `done` supplies the `turn_id` that
+`GET /api/citations/{turn_id}/{chunk_id}` needs; between the `citations` and
+`done` events it is styled but inert. Markers are matched by their number, not
+by position — a turn can cite `[1] [2] [5]`.
+
+Reloading a session rebuilds the transcript from PostgreSQL. The transcript
+endpoint carries no citation payload and there is no endpoint that lists a
+turn's citations after the fact, so the client caches each turn's set in
+`localStorage`; a marker with no cached entry renders as plain text rather than
+as a link that would not resolve.

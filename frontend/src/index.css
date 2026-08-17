@@ -1,0 +1,153 @@
+@import 'katex/dist/katex.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* --------------------------------------------------------------------------
+   Tokens.
+
+   Calm academic: warm-gray neutrals, one indigo accent, and amber reserved
+   exclusively for citations. Amber is never used for anything else — its only
+   job is to mean "this came from the paper".
+   -------------------------------------------------------------------------- */
+:root {
+  --bg: #faf9f7;
+  --surface: #ffffff;
+  --raised: #f3f1ed;
+  --line: #e4e0d9;
+  --ink: #1c1a17;
+  --muted: #6b655c;
+  --faint: #9a9389;
+
+  --accent: #4338ca;
+  --accent-ink: #ffffff;
+  --accent-soft: #eceafb;
+
+  --cite: #a35b06;
+  --cite-soft: #fdf0dc;
+  --cite-line: #e8c48c;
+
+  --ok: #2f6f4f;
+  --warn: #a35b06;
+  --danger: #a33232;
+}
+
+.dark {
+  --bg: #16151a;
+  --surface: #1d1c22;
+  --raised: #26252c;
+  --line: #34323b;
+  --ink: #ece9e3;
+  --muted: #a09a90;
+  --faint: #756f66;
+
+  --accent: #a5b4fc;
+  --accent-ink: #1a1830;
+  --accent-soft: #262444;
+
+  --cite: #f0b45f;
+  --cite-soft: #382c17;
+  --cite-line: #7a5a24;
+
+  --ok: #6fbf95;
+  --warn: #f0b45f;
+  --danger: #e08585;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    /* Desktop-only by decision: below this the layout is not supported. */
+    min-width: 1280px;
+    @apply bg-bg text-ink font-sans antialiased;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+  }
+
+  /* Minimal motion is the default; the two animated moments opt in. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .rail-item {
+    @apply w-full rounded-md px-2.5 py-2 text-left text-[13px] leading-snug
+           transition-colors duration-100;
+  }
+  .rail-item-idle {
+    @apply text-muted hover:bg-raised hover:text-ink;
+  }
+  .rail-item-active {
+    @apply bg-accent-soft text-ink;
+  }
+  .rail-heading {
+    @apply px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-faint;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Answer prose. Serif, because the assistant is producing paper text, not UI.
+   -------------------------------------------------------------------------- */
+.answer {
+  @apply font-serif text-[17px] leading-[1.72] text-ink;
+}
+.answer > * + * {
+  @apply mt-4;
+}
+.answer h1,
+.answer h2,
+.answer h3 {
+  @apply font-sans font-semibold text-ink;
+}
+.answer h1 {
+  @apply mt-7 text-[19px];
+}
+.answer h2 {
+  @apply mt-7 text-[17px];
+}
+.answer h3 {
+  @apply mt-6 text-[15px] tracking-tight;
+}
+.answer ul {
+  @apply list-disc space-y-1.5 pl-5;
+}
+.answer ol {
+  @apply list-decimal space-y-1.5 pl-5;
+}
+.answer code {
+  @apply rounded bg-raised px-1 py-0.5 font-mono text-[0.85em];
+}
+.answer pre {
+  @apply overflow-x-auto rounded-lg border border-line bg-raised p-3;
+}
+.answer pre code {
+  @apply bg-transparent p-0;
+}
+.answer blockquote {
+  @apply border-l-2 border-line pl-4 text-muted;
+}
+.answer a {
+  @apply text-accent underline underline-offset-2;
+}
+.answer .katex {
+  font-size: 1.02em;
+}
+.answer .katex-display {
+  @apply overflow-x-auto overflow-y-hidden py-1;
+}

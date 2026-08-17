@@ -407,6 +407,60 @@ async def test_a_session_can_be_opened_and_read_back(
     assert fetched.json()["turn_count"] == 0
 
 
+async def test_listing_sessions_returns_only_the_callers_own(
+    client: AsyncClient, db_session: AsyncSession, dev_auth
+):
+    """The rail is built from this, so a leak here is a leak on screen."""
+    await client.get("/api/me")
+    mine = (await client.post("/api/sessions", json={})).json()["session_id"]
+
+    stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
+    db_session.add(stranger)
+    await db_session.flush()
+    db_session.add(Session(user_id=stranger.user_id))
+    await db_session.flush()
+
+    listed = (await client.get("/api/sessions")).json()
+
+    assert [s["session_id"] for s in listed] == [mine]
+
+
+async def test_a_listed_session_carries_the_paper_title(
+    client: AsyncClient, db_session: AsyncSession, dev_auth
+):
+    """Otherwise the rail would need one request per row to label itself."""
+    await client.get("/api/me")
+    user = await db_session.scalar(select(User).where(User.auth_subject == dev_auth))
+    paper = Paper(
+        content_hash=uuid.uuid4().hex + uuid.uuid4().hex[:32],
+        storage_uri=f"file://{uuid.uuid4()}.pdf",
+        title="Auto-Encoding Variational Bayes",
+        processing_status="ready",
+    )
+    db_session.add(paper)
+    await db_session.flush()
+    db_session.add(UserPaperAccess(user_id=user.user_id, paper_id=paper.paper_id))
+    await db_session.flush()
+
+    await client.post("/api/sessions", json={"paper_id": str(paper.paper_id)})
+    listed = (await client.get("/api/sessions")).json()
+
+    assert listed[0]["paper_title"] == "Auto-Encoding Variational Bayes"
+    assert listed[0]["active_paper_id"] == str(paper.paper_id)
+
+
+async def test_a_session_with_no_paper_lists_a_null_title(
+    client: AsyncClient, dev_auth
+):
+    """The outer join must not drop the row."""
+    await client.post("/api/sessions", json={})
+
+    listed = (await client.get("/api/sessions")).json()
+
+    assert len(listed) == 1
+    assert listed[0]["paper_title"] is None
+
+
 async def test_the_transcript_endpoint_returns_durable_history(
     client: AsyncClient, dev_auth
 ):

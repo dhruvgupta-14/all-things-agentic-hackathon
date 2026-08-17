@@ -92,6 +92,36 @@ async def create_session(
     return _serialize(conversation)
 
 
+@router.get("")
+async def list_sessions(
+    principal: Principal = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's sessions, most recently active first.
+
+    Scoped by `user_id` in the WHERE clause rather than filtered afterwards, so
+    there is no arrangement of query parameters that widens it. The paper title
+    is joined in because the rail renders one row per session and should not
+    have to fetch each paper separately.
+    """
+    rows = await db.execute(
+        select(Session, Paper.title)
+        .outerjoin(Paper, Paper.paper_id == Session.active_paper_id)
+        .where(Session.user_id == principal.user_id)
+        .order_by(Session.last_activity_at.desc())
+    )
+
+    return [
+        {
+            **_serialize(conversation),
+            "paper_title": title,
+            "started_at": conversation.started_at,
+            "last_activity_at": conversation.last_activity_at,
+        }
+        for conversation, title in rows.all()
+    ]
+
+
 @router.get("/{session_id}")
 async def get_session(
     session_id: uuid.UUID,

@@ -80,6 +80,16 @@ class Settings(BaseSettings):
         return bool(self.auth_dev_bypass_subject) and self.app_env == "local"
 
     @property
+    def gemini_available(self) -> bool:
+        """Is a real model backend configured, by either transport?
+
+        Mirrors the branch `get_embedder()` and `get_adjudicator()` take, so a
+        caller can refuse up front rather than discovering halfway through an
+        ingest that concepts were silently skipped by the local stubs.
+        """
+        return bool(self.vertex_project or self.gemini_api_key)
+
+    @property
     def database_url(self) -> str:
         return (
             f"postgresql+asyncpg://{self.db_user}:{self.db_password}"

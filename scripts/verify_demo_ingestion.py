@@ -33,7 +33,15 @@ from sqlalchemy import func, select, text
 
 from app.config import get_settings
 from app.db.base import async_session_factory
-from app.db.models import Chunk, Concept, ConceptRelationship, Paper, Section, User
+from app.db.models import (
+    Chunk,
+    Concept,
+    ConceptRelationship,
+    Paper,
+    Section,
+    User,
+    UserPaperAccess,
+)
 from app.ingestion.pipeline import canonicalize_existing_paper, ingest_paper
 from app.services.storage import get_storage
 
@@ -132,6 +140,23 @@ async def ingest(rebuild_concepts_only: bool = False) -> None:
                 await session.flush()
                 await session.commit()
 
+            # `POST /api/papers` inserts the grant alongside the paper, and
+            # `GET /api/papers` reads the library *through* it. Without this
+            # row the papers ingest fine and every check below still passes,
+            # but the demo user's library is empty in the UI — the ingest is
+            # only half of what the upload endpoint does.
+            granted = await session.scalar(
+                select(UserPaperAccess).where(
+                    UserPaperAccess.user_id == user.user_id,
+                    UserPaperAccess.paper_id == paper.paper_id,
+                )
+            )
+            if granted is None:
+                session.add(
+                    UserPaperAccess(user_id=user.user_id, paper_id=paper.paper_id)
+                )
+                await session.commit()
+
             print(f"--- {path.name} ---")
             try:
                 if rebuild_concepts_only:
@@ -180,6 +205,25 @@ async def verify() -> int:
         ]
 
         report.check("both demo papers present", len(demo) == 2, f"found {len(demo)}")
+
+        # Presence is not visibility. `GET /api/papers` joins through
+        # `user_paper_access`, so a paper that is ingested but ungranted is
+        # perfectly healthy in every check above and still absent from the
+        # demo user's library.
+        visible = await session.scalar(
+            select(func.count())
+            .select_from(UserPaperAccess)
+            .where(
+                UserPaperAccess.user_id == user.user_id,
+                UserPaperAccess.paper_id.in_([p.paper_id for p in demo]),
+                UserPaperAccess.revoked_at.is_(None),
+            )
+        )
+        report.check(
+            "both papers visible to the demo user",
+            visible == len(demo),
+            f"{visible} of {len(demo)} granted via user_paper_access",
+        )
 
         for paper in demo:
             sections = await session.scalar(

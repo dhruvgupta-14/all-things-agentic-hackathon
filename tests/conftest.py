@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
-from app.db.base import get_db
+from app.db.base import SERVER_SETTINGS, get_db
 from app.main import app
 
 
@@ -33,7 +33,16 @@ async def db_connection() -> AsyncGenerator[AsyncConnection, None]:
     # engine: pytest-asyncio runs each test in a fresh event loop, and a pooled
     # asyncpg connection carried over from a closed loop fails with "another
     # operation is in progress".
-    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    #
+    # It carries the application's SERVER_SETTINGS, though. Without them the
+    # suite runs on planner defaults the application never uses, so a query
+    # that only misbehaves under the real configuration passes here — which is
+    # how the HNSW post-filtering bug stayed invisible.
+    engine = create_async_engine(
+        get_settings().database_url,
+        poolclass=NullPool,
+        connect_args={"server_settings": SERVER_SETTINGS},
+    )
     try:
         async with engine.connect() as connection:
             transaction = await connection.begin()

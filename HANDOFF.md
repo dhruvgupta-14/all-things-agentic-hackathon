@@ -37,7 +37,7 @@ Everything below was verified on 2026-08-19 on the origin machine.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Backend tests | `pytest` | **220 passed** |
+| Backend tests | `pytest` | **252 passed** |
 | Lint | `ruff check .` | clean |
 | Migration drift | `alembic check` | no drift |
 | Frontend build | `npm run build` | clean |
@@ -287,14 +287,39 @@ learning signals) land with these tools. The pipeline currently records
 `memory_read = False`, which is honest rather than aspirational — keep it that
 way until the tool actually reads memory.
 
-### 5.2 Constants that are still unspecified
+### 5.2 Constants — DECIDED, in `app/services/learner_state.py`
 
-These need deciding before the tools above can be written. **They are not in
-the spec** — someone has to choose them:
+All three are chosen and tested. They were not free parameters: the
+architecture works two examples end to end, and both are reproduced exactly by
+`tests/test_learner_state.py`, so moving a constant fails the suite rather than
+the demo.
 
-- the `(signal_type, signal_source)` → weight table
-- the understanding-score formula, its decay, and `score_confidence`
-- the callback turn gap (how many turns before a cross-paper callback may fire)
+| Decision | Value |
+| --- | --- |
+| Weight class order | `quiz 1.0 > user_stated 0.9 > explicit 0.8 > implicit 0.4 > system 0.0` |
+| Score | weighted mean of per-signal target values; order-independent by construction |
+| Assisted understanding | `0.70`, not `1.0` — resolving a struggle must not erase it |
+| Confidence | `W / (W + 0.7)`, saturating; **does not decay** |
+| Decay | 30-day half-life on the score, floored at `0.25`, applied at read time |
+| Callback gate | weak below `0.40` **and** confidence ≥ `0.30` (the index predicate) |
+| Callback turn gap | `5` turns |
+
+Two of these carry reasoning worth not re-deriving:
+
+**`system` weighs 0, not "a little".** The reinforcement backstop fires exactly
+when the agent recorded nothing. At any positive weight it accumulates — at
+0.10, three backstop rows sit exactly on the 0.3 confidence floor and ten clear
+it — so a concept nobody demonstrated anything about would be reported with
+confidence. Volume of non-evidence must not become evidence. The row still
+moves `last_reinforced_at`, which resets the decay clock; that is what
+reinforcement means and why it is worth writing.
+
+**Confidence does not decay, the score does.** If both decayed, a concept would
+drop under the confidence floor at roughly the moment its score got low enough
+to be worth raising — and the cross-paper callback could never fire on the
+stale concepts it exists to surface. Confidence answers "how much did we
+observe", which does not shrink; the score answers "do they still know it",
+which does. (how many turns before a cross-paper callback may fire)
 
 ### 5.3 Frontend views not built
 
@@ -307,7 +332,16 @@ would undercut the grounding claim the whole project rests on.
 - Cloud Run deploy, CI
 - swap `LocalStorage` → GCS, background tasks → Cloud Tasks
   (`scripts/provision_gcp.sh` exists and is untested)
-- **blocked on the $150 GCP credits**
+- no longer blocked: project `research-companion-506013`, billing enabled
+
+> **🔴 Landmine, fix before the first deploy.** `provision_gcp.sh` emits
+> `VERTEX_LOCATION=$REGION` (`us-central1`) into the staging env. **Gemini 3.x
+> is not served from a region** — `gemini-3.5-flash` returns 404 there, and
+> only `gemini-2.5-flash` answers, which would silently drop the build below
+> HK-1's "Flash-class 3.5+". It works from the `global` endpoint, which serves
+> `gemini-embedding-001` too, so local runs on `VERTEX_LOCATION=global`. The
+> script has **not** been changed — deploy work is out of scope until Phase 3,
+> and changing it blind risks a second wrong value. Fix it there, deliberately.
 
 ### 5.5 Billing
 
@@ -320,7 +354,29 @@ IDs to keep working. **Enable billing before the recording session.**
 
 ## 6. Open decisions and known defects
 
-### 6.1 🔴 `turns` cannot be deleted — a spec-level contradiction
+### 6.1 ✅ RESOLVED — `turns` cannot be deleted
+
+Fixed in migration `9a1f4c2b7e35`. `reject_mutation()` now refuses UPDATE
+unconditionally, and refuses DELETE unless the transaction has explicitly set
+`app.erasure`. `app/services/erasure.py` is the only thing that sets it, via
+`set_config(..., is_local => true)`, and clears it again as soon as the delete
+has run. `tests/test_erasure.py` pins both halves: ordinary deletes and the
+`users` cascade still raise `append-only`, and `erase_user()` removes every
+dependent row without touching anyone else's.
+
+**Why not mirror `messages`**, which was the recommendation below: `messages`
+opens DELETE because the *routine* 30-day retention sweep needs it. Nothing
+routine deletes from these three — they are the audit trail the learner model
+is replayed from — so dropping a mandated guarantee to enable an operator
+action performed on purpose was the worse trade. This also matches how the
+original migration described the design: grants are the primary control ("the
+app role holds only SELECT, INSERT") and the trigger is what survives a role
+misconfiguration. A trigger that blocks the privileged path too enforces more
+than §4.7 asked for, and the declared `ON DELETE CASCADE` was what paid for it.
+
+The original report follows, for context.
+
+#### Original report
 
 `turns` declares `ON DELETE CASCADE` on both `session_id` and `user_id`, **and**
 a `BEFORE UPDATE OR DELETE` append-only trigger. Both cannot hold:
@@ -424,7 +480,7 @@ Run all of these after any change. This is the established gate.
 
 ```bash
 # Backend
-pytest                        # expect 220 passed
+pytest                        # expect 252 passed
 ruff check .
 alembic check                 # expect: No new upgrade operations detected
 
@@ -472,10 +528,15 @@ These have been given repeatedly and still apply:
 
 ## 10. Suggested next session
 
-1. Decide §6.1 (the `turns` cascade contradiction) — it is a five-minute
-   decision blocking a spec requirement.
-2. Profile §6.3 (latency). 56s is the single biggest threat to the video.
-3. Decide the §5.2 constants, then build `retrieve_learner_memory` — it is the
-   tool that makes `memory_used` and the "companion" framing real.
-4. Then `get_concept_context`, which unlocks the cross-paper callback that the
+~~1. Decide §6.1 (the `turns` cascade contradiction).~~ Done — migration
+`9a1f4c2b7e35`.
+~~3. Decide the §5.2 constants.~~ Done — `app/services/learner_state.py`.
+
+1. Build `retrieve_learner_memory` on top of `learner_state.py`, which now has
+   the weights, the score arithmetic, the decay and the callback gate it needs.
+   It is the tool that makes `memory_used` and the "companion" framing real.
+2. Profile §6.3 (latency). 56s is the single biggest threat to the video, and
+   nothing has been done about it yet.
+3. Then `get_concept_context`, which unlocks the cross-paper callback that the
    §12 demo script is built around.
+4. Before deploying, read the `VERTEX_LOCATION` landmine in §5.4.

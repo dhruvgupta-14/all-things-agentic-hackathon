@@ -204,9 +204,12 @@ if [[ "$MODE" == "verify" ]]; then
   if api_enabled aiplatform.googleapis.com && has_project_role roles/aiplatform.user; then
     ok "API enabled and roles/aiplatform.user bound"
     echo "       to prove an actual embedding call works (billable, one request):"
-    echo "         VERTEX_PROJECT=$PROJECT PYTHONPATH=. python -c \\"
-    echo "           'from app.services.embeddings import VertexEmbedder;" \
-         "print(len(VertexEmbedder(\"$PROJECT\", \"$REGION\").embed_query(\"test\")))'"
+    echo "         PYTHONPATH=. python -c \\"
+    echo "           'from app.services.embeddings import get_embedder;" \
+         "e = get_embedder(); print(type(e).__name__, len(e.embed_query(\"test\")))'"
+    echo "       expect: GeminiEmbedder 768. HashingEmbedder means the"
+    echo "       credentials or VERTEX_PROJECT did not load, and everything"
+    echo "       downstream is silently running on deterministic stubs."
   else
     note "Vertex AI not fully configured"
   fi
@@ -352,7 +355,13 @@ AUTH_DEV_BYPASS_SUBJECT=
 FIREBASE_PROJECT_ID=$PROJECT
 STORAGE_BUCKET=$BUCKET
 VERTEX_PROJECT=$PROJECT
-VERTEX_LOCATION=$REGION
+
+# Deliberately NOT the region above. Gemini 3.x is not served from a regional
+# endpoint: measured on this project, gemini-3.5-flash returns 404 in
+# us-central1 and only gemini-2.5-flash answers there — which would silently
+# drop the deployment below HK-1's "Flash-class 3.5+". The global endpoint
+# serves gemini-embedding-001 too, so one value covers both.
+VERTEX_LOCATION=global
 
 # Retune against real embeddings before trusting it — the local default of
 # 0.25 was calibrated on the hashing stub and does not transfer.

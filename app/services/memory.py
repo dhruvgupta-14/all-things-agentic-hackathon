@@ -22,7 +22,9 @@ row has not been rewritten.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -120,6 +122,7 @@ class MemoryService:
     ) -> None:
         self._session = session
         self._embedder = embedder or get_embedder()
+        self.last_embed_ms: float = 0.0
 
     # -- record construction ------------------------------------------------
 
@@ -159,7 +162,10 @@ class MemoryService:
         if not query.strip():
             return []
 
-        vector = self._embedder.embed_query(query)
+        embed_began = time.perf_counter()
+        # Off the event loop — see the note in `retrieval.py`.
+        vector = await asyncio.to_thread(self._embedder.embed_query, query)
+        self.last_embed_ms = (time.perf_counter() - embed_began) * 1000
         distance = Concept.embedding.cosine_distance(vector)
         similarity = (1 - distance).cast(Float).label("similarity")
 

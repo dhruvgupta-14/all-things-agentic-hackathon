@@ -21,6 +21,7 @@ import re
 from typing import Protocol
 
 from tenacity import (
+    before_sleep_log,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -166,15 +167,16 @@ class GeminiEmbedder:
         return "vertex" if self._project else "ai-studio"
 
     def _get_client(self):
+        # Shared per process: building one costs a ~12s credential and TLS
+        # handshake on its first request (see app/services/genai_client.py).
         if self._client is None:
-            from google import genai  # imported lazily: local dev has no creds
+            from app.services.genai_client import get_genai_client
 
-            if self._project:
-                self._client = genai.Client(
-                    vertexai=True, project=self._project, location=self._location
-                )
-            else:
-                self._client = genai.Client(api_key=self._api_key)
+            self._client = get_genai_client(
+                api_key=self._api_key,
+                project=self._project,
+                location=self._location,
+            )
         return self._client
 
     @retry(
@@ -186,6 +188,10 @@ class GeminiEmbedder:
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=2, min=4, max=64),
         reraise=True,
+        # A silent backoff looks exactly like a slow API. Logging every
+        # sleep is how you tell 12s of rate limiting apart from 12s of
+        # latency, which is a distinction that cost real time once.
+        before_sleep=before_sleep_log(logger, logging.WARNING),
     )
     def _embed_call(self, texts: list[str], task_type: str) -> list[list[float]]:
         from google.genai import types

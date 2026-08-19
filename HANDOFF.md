@@ -37,7 +37,7 @@ Everything below was verified on 2026-08-20.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Backend tests | `pytest` | **363 passed** |
+| Backend tests | `pytest` | **383 passed** |
 | Lint | `ruff check .` | clean |
 | Migration drift | `alembic check` | no drift |
 | Frontend build | `npm run build` | clean |
@@ -417,21 +417,49 @@ instruction fragment on the *next* turn, and `apply_pending()` stamps
 nothing — a single not-helpful is evidence, not a mandate to retune how
 someone is taught, and `applied` reports that honestly rather than flattering.
 
-### 5.4 Deployment and infrastructure
+### 5.4 Deployment — prepared, not deployed
 
-- Cloud Run deploy, CI
-- swap `LocalStorage` → GCS, background tasks → Cloud Tasks
-  (`scripts/provision_gcp.sh` exists and is untested)
-- no longer blocked: project `research-companion-506013`, billing enabled
+Everything that can be done without spending money or creating resources is
+done. **Nothing has been deployed.**
 
-> **🔴 Landmine, fix before the first deploy.** `provision_gcp.sh` emits
-> `VERTEX_LOCATION=$REGION` (`us-central1`) into the staging env. **Gemini 3.x
-> is not served from a region** — `gemini-3.5-flash` returns 404 there, and
-> only `gemini-2.5-flash` answers, which would silently drop the build below
-> HK-1's "Flash-class 3.5+". It works from the `global` endpoint, which serves
-> `gemini-embedding-001` too, so local runs on `VERTEX_LOCATION=global`. The
-> script has **not** been changed — deploy work is out of scope until Phase 3,
-> and changing it blind risks a second wrong value. Fix it there, deliberately.
+| Artefact | What it is |
+| --- | --- |
+| `Dockerfile` | Cloud Run image. Honours `$PORT`, runs non-root, single uvicorn worker, `--timeout-keep-alive 120` so an idle SSE connection is not reaped mid-turn |
+| `.dockerignore` | Keeps `.env`, `venv`, `.pgdata` and the SPA out of a pushed image |
+| `scripts/preflight_deploy.py` | Read-only readiness check. No API calls, creates nothing |
+| `scripts/provision_gcp.sh` | Now emits `VERTEX_LOCATION=global` (see below) |
+
+The image is **built and run-tested**, not just written: it starts, honours
+`PORT=9090`, connects to Postgres and serves real data.
+
+```bash
+docker build -t paper-companion .
+PYTHONPATH=. python scripts/preflight_deploy.py
+```
+
+> **The §5.4 landmine is fixed.** `provision_gcp.sh` used to emit
+> `VERTEX_LOCATION=$REGION`, which is `us-central1` — where Gemini 3.x returns
+> 404 and only `gemini-2.5-flash` answers. That deployment would have started,
+> answered, cited correctly and silently failed HK-1. It now emits `global`,
+> `preflight_deploy.py` checks it, and `tests/test_deployment_guards.py` fails
+> the suite if it ever regresses. Its `--verify` hint also referenced
+> `VertexEmbedder`, a class that has never existed; it now uses
+> `get_embedder()` and says what a `HashingEmbedder` result means.
+
+**Still real work, deliberately not started:**
+
+- **Cloud SQL is not wired up.** `settings.database_url` builds a `host:port`
+  DSN. Cloud SQL wants the Python connector or a unix socket, and
+  `cloud-sql-python-connector` is in `requirements.txt` but unused. This is
+  code, not configuration.
+- Migrations do not run on boot, on purpose. `alembic upgrade head` is a
+  deliberate step before the first deploy of a revision.
+- Background ingestion still uses FastAPI `BackgroundTasks`, not Cloud Tasks.
+  The queue is provisioned; the push route is not written.
+- Firebase Auth is not configured, so the deployed app has no way to
+  authenticate anyone until `FIREBASE_PROJECT_ID` is set and the SPA sends a
+  token.
+- The SPA is not in the image and has no host yet.
 
 ### 5.5 Billing
 
@@ -495,12 +523,47 @@ memory would be a lie of exactly the kind this project is built to avoid.
 Labels for the missing phases already exist in `frontend/src/lib/phases.js`, so
 they render automatically once emitted.
 
-### 6.3 🟠 Latency — 56–70s per turn
+### 6.3 ✅ PROFILED AND IMPROVED — latency
 
-Measured 70,375ms and 56,042ms on two real turns. Causes: multiple tool
-searches per question, model latency, and full generation completing before
-verification and streaming begin. The stepper keeps the pane alive, but this is
-not demo-viable. **Profile before the video.**
+Was 56-70s. Now **median ~34s**, measured over eight clean turns through HTTP:
+20.5 / 28.1 / 32.2 / 32.5 / 34.7 / 35.8 / 38.6 / 49.6s. Latency tracks tool
+calls almost linearly — 2 tools → 32s, 3 → 35s, 5 → 50s — at roughly 7-8s per
+model round-trip.
+
+`scripts/profile_turns.py` prints the span breakdown; `app/services/timing.py`
+collects it and logs it per turn, so the same numbers are available in Cloud
+Logging rather than only from a script that is about to be deleted.
+
+**The cause was not what §6.3 guessed.** It was not "full generation before
+streaming" and it was not the frontend:
+
+| Where | Before | After |
+| --- | --- | --- |
+| First embedding through a cold `genai.Client` | **12.1s** | 460ms |
+| Same, second call onward | 460ms | 460ms |
+| Retrieval ANN + SQL | ~35ms | ~35ms |
+| Citation verification | <2ms | <2ms |
+| Persistence | 60-200ms | 60-200ms |
+| Transport (client minus server) | — | **77-251ms** |
+| Streaming tail after first token | — | **2-8ms** |
+
+Nothing cached the Vertex client, and `MemoryService` and `RetrievalService`
+each built their own, so **every turn paid a ~12s credential-and-TLS handshake
+twice** before the model was reached. `app/services/genai_client.py` now shares
+one client per process, and `app/main.py` warms it during startup so the first
+turn after a deploy does not wear it either. Boot takes ~19s as a result, which
+is the right place for that cost.
+
+Two smaller fixes came out of the same pass: the synchronous embedder now runs
+via `asyncio.to_thread`, so a 460ms call no longer blocks the event loop and
+every other request on the worker; and `before_sleep_log` on the embedding
+retry means a backoff is visible in the logs instead of looking like a slow
+API.
+
+**What is left is the model**, ~90% of the turn, and it is not reducible
+without changing behaviour: fewer searches means less grounding, and streaming
+before verification is exactly the guarantee the project is built on. Time to
+first token is essentially the whole turn, by design.
 
 ### 6.4 🟠 Transient model unavailability
 
@@ -579,7 +642,7 @@ Run all of these after any change. This is the established gate.
 
 ```bash
 # Backend
-pytest                        # expect 363 passed
+pytest                        # expect 383 passed
 ruff check .
 alembic check                 # expect: No new upgrade operations detected
 
@@ -627,15 +690,22 @@ These have been given repeatedly and still apply:
 
 ## 10. Suggested next session
 
-~~1. Decide §6.1 (the `turns` cascade contradiction).~~ Done — migration
-`9a1f4c2b7e35`.
-~~3. Decide the §5.2 constants.~~ Done — `app/services/learner_state.py`.
+Done since this list was written: §6.1 (migration `9a1f4c2b7e35`), the §5.2
+constants, all five agent tools, the callback gate, the quiz flow, §15's HTTP
+surface, the memory and graph views, §6.5, and §6.3 (median ~34s, down from
+56-70s). CORE is essentially complete; what is left is deployment and the
+recording.
 
-1. Build `retrieve_learner_memory` on top of `learner_state.py`, which now has
-   the weights, the score arithmetic, the decay and the callback gate it needs.
-   It is the tool that makes `memory_used` and the "companion" framing real.
-2. Profile §6.3 (latency). 56s is the single biggest threat to the video, and
-   nothing has been done about it yet.
-3. Then `get_concept_context`, which unlocks the cross-paper callback that the
-   §12 demo script is built around.
-4. Before deploying, read the `VERTEX_LOCATION` landmine in §5.4.
+1. **Wire up Cloud SQL.** The only remaining piece of real deployment code —
+   `database_url` builds a `host:port` DSN and Cloud SQL needs the connector or
+   a unix socket. Everything else for Phase 3 is prepared (§5.4).
+2. **Deploy.** `preflight_deploy.py` first, then `provision_gcp.sh`, then
+   `alembic upgrade head` against Cloud SQL, then `gcloud run deploy`. Grant
+   `roles/run.invoker` afterwards or Cloud Tasks pushes will 403.
+3. **Firebase Auth**, and decide the judge access method (§20 decision 4 — the
+   default is a shared demo account with published credentials).
+4. **Rehearse the demo.** Run `verify_callback.py` first: the cross-paper
+   callback cannot fire on a fresh database and that is correct. Budget for
+   429s — one retry is built in now, but sustained rate limiting still fails
+   turns, and it will not look like rate limiting on camera.
+5. Host the SPA. It is not in the container image, by design.

@@ -12,7 +12,9 @@ that distinction is what silently degrades recall; in pgvector it is free.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -69,6 +71,8 @@ class RetrievalService:
     ) -> None:
         self._session = session
         self._embedder = embedder or get_embedder()
+        # Last embedding round-trip, for the turn breakdown.
+        self.last_embed_ms: float = 0.0
 
     async def retrieve(
         self,
@@ -106,7 +110,12 @@ class RetrievalService:
             return []
 
         scope = list(paper_scope)
-        query_vector = self._embedder.embed_query(query)
+        embed_began = time.perf_counter()
+        # Off the event loop: the embedder is a synchronous HTTP client,
+        # and a ~460ms blocking call stalls every other request on this
+        # worker, including the SSE stream of a turn already in flight.
+        query_vector = await asyncio.to_thread(self._embedder.embed_query, query)
+        self.last_embed_ms = (time.perf_counter() - embed_began) * 1000
 
         # Cosine distance in [0, 2]; similarity is its complement.
         distance = Chunk.embedding.cosine_distance(query_vector)

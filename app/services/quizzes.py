@@ -178,15 +178,16 @@ class _GeminiCall:
         return self._model
 
     def _get_client(self):
+        # Shared per process: building one costs a ~12s credential and TLS
+        # handshake on its first request (see app/services/genai_client.py).
         if self._client is None:
-            from google import genai
+            from app.services.genai_client import get_genai_client
 
-            if self._project:
-                self._client = genai.Client(
-                    vertexai=True, project=self._project, location=self._location
-                )
-            else:
-                self._client = genai.Client(api_key=self._api_key)
+            self._client = get_genai_client(
+                api_key=self._api_key,
+                project=self._project,
+                location=self._location,
+            )
         return self._client
 
     def _structured(self, prompt: str, schema, *, temperature: float):

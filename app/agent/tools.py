@@ -19,6 +19,7 @@ every call and refuses any attempt to smuggle scope in through arguments.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from app.services.memory import MemoryRecord, MemoryService
 from app.services.quizzes import QuizService, QuizUnavailable
 from app.services.retrieval import RetrievalService, RetrievedChunk
 from app.services.signals import PendingSignal, SignalRejected, SignalService
+from app.services.timing import TurnTimings
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,9 @@ class TurnToolContext:
     signals: SignalService | None = None
     quizzes: QuizService | None = None
     conversation: Session | None = None
+    # Set by the pipeline so tool time is attributed inside the agent loop
+    # rather than disappearing into it.
+    timings: TurnTimings | None = None
     session_id: uuid.UUID | None = None
     # The turn row does not exist until step 11, so observations written during
     # the loop carry a turn id the pipeline backfills. Null provenance is
@@ -124,6 +129,7 @@ def build_retrieve_paper_context(context: TurnToolContext):
             Passages, each with the citation marker to use when referring to it.
         """
         context.tools_called.append("retrieve_paper_context")
+        began = time.perf_counter()
 
         cleaned = (query or "").strip()[:MAX_QUERY_CHARS]
         if not cleaned:
@@ -156,6 +162,12 @@ def build_retrieve_paper_context(context: TurnToolContext):
                     "pages": chunk.citation_locator,
                 }
             )
+
+        if context.timings is not None:
+            elapsed = (time.perf_counter() - began) * 1000
+            embed_ms = getattr(context.retrieval, "last_embed_ms", 0.0)
+            context.timings.record("tool:retrieve:embed", embed_ms)
+            context.timings.record("tool:retrieve:ann+sql", elapsed - embed_ms)
 
         if not passages:
             return {

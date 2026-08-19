@@ -13,6 +13,7 @@ passed as an argument, which is exactly the thing §13 forbids.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -44,6 +45,73 @@ APP_NAME = "paper-companion"
 # S-1: left uncapped, the agent searched three times for one question. The cap
 # bounds both latency on camera and spend against a per-day request quota.
 MAX_ITERATIONS = 3
+
+
+# Vertex returns 429 RESOURCE_EXHAUSTED under shared-capacity pressure and 503
+# UNAVAILABLE on transient faults, and both usually clear on an immediate
+# retry — observed repeatedly during live runs, including mid-demo. A failed
+# turn is a far worse outcome than a slower one, so these are retried; anything
+# else is a real fault and still fails the turn closed.
+# One retry, not two. Each attempt re-runs the entire agent loop, which is
+# 30-50s of model time, so a generous budget turns a 40s turn into a 2-minute
+# one — measured at 116s with three attempts under sustained rate limiting.
+# The failure this exists for is a single 429 that clears immediately, and one
+# retry catches that; a second only makes a bad case worse.
+MAX_TRANSIENT_ATTEMPTS = 2
+TRANSIENT_BACKOFF_SECONDS = 2
+
+_TRANSIENT_MARKERS = (
+    "resource_exhausted",
+    "429",
+    "unavailable",
+    "503",
+    "deadline_exceeded",
+    "504",
+)
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Worth waiting out, as opposed to worth reporting.
+
+    Matched on the message because ADK wraps the transport's exception types,
+    so the class alone does not distinguish "the model is busy" from "the
+    prompt was malformed".
+    """
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in _TRANSIENT_MARKERS)
+
+
+async def _reset_for_retry(context: TurnToolContext) -> None:
+    """Undo what a failed attempt's tool calls left behind.
+
+    `memory_seen` is deliberately *not* cleared: the unconditional prefetch put
+    it there before the agent ran, so clearing it would make the turn report
+    `memory_read = False` for a read that genuinely happened.
+
+    A quiz is the one tool with state outside this context. If a failed attempt
+    asked one, the reader never saw the question — leaving the session in
+    QUIZ_PENDING would grade their next message against a question that was
+    never put to them.
+    """
+    context.retrieved.clear()
+    context.queries.clear()
+    context.tools_called.clear()
+    context.pending_signals.clear()
+
+    if context.quiz_asked is not None and context.conversation is not None:
+        logger.warning(
+            "undoing a quiz asked by a failed attempt", extra={"quiz_id": str(context.quiz_asked)}
+        )
+        context.conversation.activity = "FREE"
+        context.conversation.pending_quiz_id = None
+        if context.session is not None:
+            from app.db.models import Quiz
+
+            stale = await context.session.get(Quiz, context.quiz_asked)
+            if stale is not None:
+                await context.session.delete(stale)
+            await context.session.flush()
+        context.quiz_asked = None
 
 
 class AgentUnavailable(Exception):
@@ -179,35 +247,56 @@ async def run_turn(
 
     parts: list[str] = []
     input_tokens = output_tokens = None
-    iterations = 0
 
-    try:
-        async for event in runner.run_async(
-            user_id=str(context.user_id),
-            session_id=session_key,
-            new_message=types.Content(
-                role="user", parts=[types.Part(text=user_message)]
-            ),
-        ):
-            usage = getattr(event, "usage_metadata", None)
-            if usage is not None:
-                input_tokens = getattr(usage, "prompt_token_count", None)
-                output_tokens = getattr(usage, "candidates_token_count", None)
+    for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
+        # Each attempt re-runs the whole loop, so the accumulators it fills
+        # have to start empty. Leaving them would renumber citation markers
+        # against a retrieval set containing both attempts' passages — the one
+        # thing in this system that must never be approximate.
+        await _reset_for_retry(context)
+        parts = []
+        iterations = 0
 
-            if event.is_final_response() and event.content and event.content.parts:
-                parts.append(
-                    "".join(part.text or "" for part in event.content.parts)
+        try:
+            async for event in runner.run_async(
+                user_id=str(context.user_id),
+                session_id=session_key,
+                new_message=types.Content(
+                    role="user", parts=[types.Part(text=user_message)]
+                ),
+            ):
+                usage = getattr(event, "usage_metadata", None)
+                if usage is not None:
+                    input_tokens = getattr(usage, "prompt_token_count", None)
+                    output_tokens = getattr(usage, "candidates_token_count", None)
+
+                if event.is_final_response() and event.content and event.content.parts:
+                    parts.append(
+                        "".join(part.text or "" for part in event.content.parts)
+                    )
+                else:
+                    iterations += 1
+                    if iterations > MAX_ITERATIONS * 4:
+                        # A runaway loop costs real money and real latency.
+                        # Stop and compose from whatever has been gathered.
+                        logger.warning("agent loop exceeded its iteration budget")
+                        break
+            break
+        except Exception as exc:
+            if attempt < MAX_TRANSIENT_ATTEMPTS and _is_transient(exc):
+                delay = TRANSIENT_BACKOFF_SECONDS * attempt
+                logger.warning(
+                    "agent run hit a transient model error, retrying in %ss "
+                    "(attempt %s/%s): %s",
+                    delay,
+                    attempt,
+                    MAX_TRANSIENT_ATTEMPTS,
+                    str(exc)[:200],
                 )
-            else:
-                iterations += 1
-                if iterations > MAX_ITERATIONS * 4:
-                    # A runaway loop costs real money and real latency. Stop
-                    # and compose from whatever has been gathered.
-                    logger.warning("agent loop exceeded its iteration budget")
-                    break
-    except Exception as exc:
-        logger.exception("agent run failed")
-        raise AgentUnavailable(str(exc)) from exc
+                await asyncio.sleep(delay)
+                continue
+            logger.exception("agent run failed")
+            raise AgentUnavailable(str(exc)) from exc
 
     return AgentOutcome(
         text="".join(parts).strip(),

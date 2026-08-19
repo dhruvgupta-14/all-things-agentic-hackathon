@@ -68,6 +68,7 @@ from app.services.retrieval import (
     authorized_paper_scope,
 )
 from app.services.signals import SignalRejected, SignalService
+from app.services.timing import TurnTimings
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,7 @@ class TurnPipeline:
     ) -> AsyncIterator[str]:
         """Run one turn, yielding encoded SSE frames."""
         started = time.perf_counter()
+        timings = TurnTimings()
 
         yield StateEvent(phase="started", activity=conversation.activity).encode()
 
@@ -226,25 +228,27 @@ class TurnPipeline:
                     yield frame
                 return
 
-            scope, paper = await self._scope_for(conversation, user_id)
+            with timings.span("scope"):
+                scope, paper = await self._scope_for(conversation, user_id)
 
             context = TurnToolContext(
                 session=self._session,
-                user_id=user_id,
+                    user_id=user_id,
                 paper_scope=scope,
                 retrieval=RetrievalService(self._session),
                 memory=MemoryService(self._session),
                 signals=SignalService(self._session),
                 quizzes=QuizService(self._session),
-                conversation=conversation,
+                    conversation=conversation,
                 session_id=conversation.session_id,
             )
 
             # Step 6 — context assembly. History is the durable transcript,
             # not anything ADK remembers.
-            history = await self._messages.history_for_context(
-                conversation.session_id
-            )
+            with timings.span("history"):
+                history = await self._messages.history_for_context(
+                    conversation.session_id
+                )
 
             # Step 4 — memory prefetch, unconditional. An agent that *chooses*
             # whether to consult memory will sometimes not, and the
@@ -254,17 +258,19 @@ class TurnPipeline:
                 phase="consulting_memory", activity=conversation.activity
             ).encode()
 
-            prefetched = await context.memory.prefetch(user_id, user_message)
-            context.remember(prefetched)
+            with timings.span("memory_prefetch"):
+                prefetched = await context.memory.prefetch(user_id, user_message)
+                context.remember(prefetched)
 
             # Step 10 — the callback gate. Every path out of it records a
             # reason, so a callback that did not happen is never silent.
-            reader = await self._session.get(User, user_id)
-            callback = await CallbackService(self._session).decide(
-                user=reader,
-                active_paper_id=paper.paper_id if paper else None,
-                prefetched=prefetched,
-            )
+            with timings.span("callback_gate"):
+                reader = await self._session.get(User, user_id)
+                callback = await CallbackService(self._session).decide(
+                    user=reader,
+                    active_paper_id=paper.paper_id if paper else None,
+                    prefetched=prefetched,
+                )
             if callback.fired and callback.prior_paper_id is not None:
                 # Scope widens to exactly two papers, and only after the grant
                 # on the prior one was re-verified inside the gate.
@@ -275,17 +281,21 @@ class TurnPipeline:
             ).encode()
 
             # Steps 7-8 — the agent loop and composition.
+            context.timings = timings
             try:
-                outcome = await run_turn(
-                    context=context,
-                    history=history,
-                    user_message=user_message,
-                    paper_title=paper.title if paper else None,
-                    session_key=str(conversation.session_id),
-                    memory_summary=_memory_summary(prefetched),
-                    callback_hint=callback.hint(),
-                    depth_hint=depth_instruction(reader.preferences if reader else None),
-                )
+                with timings.span("agent_loop"):
+                    outcome = await run_turn(
+                        context=context,
+                        history=history,
+                        user_message=user_message,
+                        paper_title=paper.title if paper else None,
+                        session_key=str(conversation.session_id),
+                        memory_summary=_memory_summary(prefetched),
+                        callback_hint=callback.hint(),
+                        depth_hint=depth_instruction(
+                            reader.preferences if reader else None
+                        ),
+                    )
             except ToolScopeViolation as exc:
                 raise TurnFailed("scope_violation", str(exc)) from exc
             except RetrievalScopeViolation as exc:
@@ -300,24 +310,26 @@ class TurnPipeline:
             ).encode()
 
             # Step 9 — the deterministic gate. Nothing streamed before this.
-            verified = citation_verifier.verify(outcome.text, context.retrieved)
+            with timings.span("verify_citations"):
+                verified = citation_verifier.verify(outcome.text, context.retrieved)
             if not verified.text:
                 raise TurnFailed("empty_response", "The agent produced no answer.")
 
             latency_ms = int((time.perf_counter() - started) * 1000)
 
             # Step 11 — persist, in one transaction.
-            turn = await self._persist(
-                conversation=conversation,
-                user_id=user_id,
-                paper_id=paper.paper_id if paper else None,
-                user_message=user_message,
-                verified=verified,
-                context=context,
-                outcome=outcome,
-                latency_ms=latency_ms,
-                callback=callback,
-            )
+            with timings.span("persist"):
+                turn = await self._persist(
+                    conversation=conversation,
+                    user_id=user_id,
+                    paper_id=paper.paper_id if paper else None,
+                    user_message=user_message,
+                    verified=verified,
+                    context=context,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
+                    callback=callback,
+                )
 
             # Step 12 — stream the verified answer.
             for index in range(0, len(verified.text), STREAM_CHUNK_CHARS):
@@ -362,6 +374,8 @@ class TurnPipeline:
                 activity=conversation.activity,
                 tools_called=outcome.tools_called,
             ).encode()
+
+            timings.log(str(turn.turn_id))
 
             yield DoneEvent(
                 turn_id=str(turn.turn_id),

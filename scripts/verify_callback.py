@@ -186,15 +186,28 @@ async def check() -> int:
                 await session.execute(select(Paper.paper_id, Paper.title))
             ).all()
         }
-        prior_titles = [
-            papers.get(pid) for pid in (struggled.source_paper_ids or [])
+        # What a callback actually requires is that the struggled-with concept
+        # resolves to a paper *other than the active one* — not that the two
+        # concepts have disjoint provenance. Provenance legitimately grows: a
+        # concept picks up a paper whenever it comes up while reading that
+        # paper, so an overlap here is ordinary and is not a broken scenario.
+        active_paper_id = (asked.source_paper_ids or [None])[0]
+        elsewhere = [
+            papers.get(pid)
+            for pid in (struggled.source_paper_ids or [])
+            if pid != active_paper_id
         ]
-        active_titles = [papers.get(pid) for pid in (asked.source_paper_ids or [])]
-        if set(prior_titles) & set(active_titles):
-            _fail("the two concepts share a paper — this is not a cross-paper pair")
-            failures += 1
+        if elsewhere:
+            _ok(
+                "the struggle lives in another paper",
+                f"{elsewhere} (active: {papers.get(active_paper_id)})",
+            )
         else:
-            _ok("the pair spans two papers", f"{prior_titles} -> {active_titles}")
+            _fail(
+                "the struggled-with concept has no paper other than the active "
+                "one — there is nothing to call back to"
+            )
+            failures += 1
 
         if struggled.score_confidence and struggled.score_confidence >= 0.3:
             _ok(

@@ -54,6 +54,7 @@ from app.schemas.sse import (
 )
 from app.services import citations as citation_verifier
 from app.services.callbacks import CallbackDecision, CallbackService
+from app.services.feedback import FeedbackService, depth_instruction
 from app.services.memory import MemoryRecord, MemoryService
 from app.services.messages import MessageService
 from app.services.quizzes import (
@@ -258,8 +259,9 @@ class TurnPipeline:
 
             # Step 10 — the callback gate. Every path out of it records a
             # reason, so a callback that did not happen is never silent.
+            reader = await self._session.get(User, user_id)
             callback = await CallbackService(self._session).decide(
-                user=await self._session.get(User, user_id),
+                user=reader,
                 active_paper_id=paper.paper_id if paper else None,
                 prefetched=prefetched,
             )
@@ -282,6 +284,7 @@ class TurnPipeline:
                     session_key=str(conversation.session_id),
                     memory_summary=_memory_summary(prefetched),
                     callback_hint=callback.hint(),
+                    depth_hint=depth_instruction(reader.preferences if reader else None),
                 )
             except ToolScopeViolation as exc:
                 raise TurnFailed("scope_violation", str(exc)) from exc
@@ -541,6 +544,10 @@ class TurnPipeline:
                 session_id=conversation.session_id,
                 turn_id=turn.turn_id,
             )
+
+        # Feedback that moved a standing preference composed *this* turn,
+        # so this is where it becomes verifiable rather than asserted.
+        await FeedbackService(self._session).apply_pending(user_id, turn.turn_id)
 
         await self._backstop_signal(context, user_id, turn)
 

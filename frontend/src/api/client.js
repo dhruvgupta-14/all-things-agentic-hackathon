@@ -71,6 +71,20 @@ export const api = {
   getMessages: (sessionId) => request(`/api/sessions/${sessionId}/messages`),
 
   getCitation: (turnId, chunkId) => request(`/api/citations/${turnId}/${chunkId}`),
+  // The durable answer to "what did this turn cite?". A reloaded transcript
+  // rehydrates from here rather than from the localStorage cache, which does
+  // not survive a different browser.
+  getTurnCitations: (turnId) => request(`/api/turns/${turnId}/citations`),
+
+  listConcepts: ({ onlyWeak = false } = {}) =>
+    request(`/api/memory/concepts${onlyWeak ? '?only_weak=true' : ''}`),
+  getConcept: (conceptId) => request(`/api/memory/concepts/${conceptId}`),
+  correctConcept: (conceptId, understandingScore, note) =>
+    request(`/api/memory/concepts/${conceptId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ understanding_score: understandingScore, note }),
+    }),
+  getGraph: () => request('/api/memory/graph'),
 }
 
 export { authHeaders }

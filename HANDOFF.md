@@ -1,6 +1,6 @@
 # Handoff — Research Paper Reading Companion
 
-**Written:** 2026-08-19 · **Hackathon deadline:** 2026-08-31 · **Feature freeze:** 2026-08-28
+**Written:** 2026-08-19 · **Last updated:** 2026-08-20 · **Hackathon deadline:** 2026-08-31 · **Feature freeze:** 2026-08-28
 
 This document exists so work can continue on a different machine without
 re-deriving decisions. It covers what is built and verified, what is not, and
@@ -33,29 +33,32 @@ The deterministic/model boundary is written as `[D] recall → [M] adjudicate �
 
 ## 2. Status snapshot
 
-Everything below was verified on 2026-08-19 on the origin machine.
+Everything below was verified on 2026-08-20.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Backend tests | `pytest` | **326 passed** |
+| Backend tests | `pytest` | **363 passed** |
 | Lint | `ruff check .` | clean |
 | Migration drift | `alembic check` | no drift |
 | Frontend build | `npm run build` | clean |
-| Frontend offline checks | `npm run verify` | 41 assertions, all pass |
+| Frontend offline checks | `npm run verify` | all pass |
 | Frontend live check | `npm run verify:live` | all pass (one real turn) |
 
-Database contents on the origin machine (**not** in git — see §4):
+Database contents (**not** in git — the PDFs are tracked, the ingested rows
+are not, so a fresh clone re-ingests; see §3.5):
 
 ```
-papers=2  chunks=113  concepts=18  edges=30
-sessions=2  turns=2  messages=4  turn_retrievals=13
-test residue: 0
+papers=2  chunks=113  concepts=18  edges=28
 ```
 
-**Nothing has been committed.** The working tree on the origin machine had
-uncommitted changes to `README.md`, `app/routers/sessions.py`,
-`tests/test_turns.py`, and the whole untracked `frontend/` directory. Confirm
-these arrived in the pull before trusting §3.
+Edge count differs from run to run: relationship typing is a model judgment.
+What must hold is the §12 precondition, which
+`scripts/verify_demo_ingestion.py` asserts.
+
+Work through Phase 2 is committed and pushed to `origin/main`. A teammate
+added `pyproject.toml` and `uv.lock` in `cfeaa42`; **that file is missing
+`pymupdf`, `reportlab` and the `psycopg[binary]` extra**, so install from
+`requirements.txt` until it is fixed.
 
 ---
 
@@ -75,7 +78,7 @@ venv/Scripts/pip install -r requirements.txt -r requirements-dev.txt   # Windows
 
 cp .env.example .env          # then fill in the values in §3.3
 docker compose up -d db       # Postgres 16 + pgvector on :5432
-alembic upgrade head          # head is 7c4e19b0d2a3
+alembic upgrade head          # head is 9a1f4c2b7e35
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -93,16 +96,22 @@ DB_PORT=5432
 
 AUTH_DEV_BYPASS_SUBJECT=local-dev-user   # no Firebase needed locally
 FIREBASE_PROJECT_ID=                     # leave blank while bypassing
-GEMINI_API_KEY=<your AI Studio key>
-GEMINI_MODEL=gemini-3.6-flash            # NOT the config default, see below
-VERTEX_PROJECT=                          # blank = AI Studio path
+GEMINI_API_KEY=                          # blank: we use Vertex, below
+VERTEX_PROJECT=research-companion-506013
+VERTEX_LOCATION=global                   # NOT us-central1 — see below
 RETRIEVAL_TOP_K=8
 RETRIEVAL_MIN_SIMILARITY=                # MUST stay blank, see §7.4
 ```
 
-`app/config.py` defaults `gemini_model` to `gemini-3.5-flash`. The origin
-machine overrode it to `gemini-3.6-flash` purely to dodge free-tier quota, not
-for any capability reason. Any Flash-class Gemini 3.5+ satisfies HK-1.
+**`VERTEX_LOCATION` must be `global`.** Gemini 3.x returns 404 in
+`us-central1` on this project — only `gemini-2.5-flash` answers there, which
+would quietly drop the build below HK-1's "Flash-class 3.5+". The `global`
+endpoint serves `gemini-embedding-001` too, so one value covers both.
+
+Local auth is Application Default Credentials, not a key:
+`gcloud auth application-default login`. If `get_embedder()` returns
+`HashingEmbedder`, the credentials or `VERTEX_PROJECT` did not load and
+everything downstream is silently running on deterministic stubs.
 
 The dev bypass authenticates every request as `local-dev-user` with no token.
 It is honoured **only** when `APP_ENV=local`; set anywhere else the app returns
@@ -153,7 +162,7 @@ adjudication call per paper.
 
 ### 4.1 Schema and migrations
 
-15 tables in `app/db/models.py`; three migrations, head `7c4e19b0d2a3`.
+15 tables in `app/db/models.py`; four migrations, head `9a1f4c2b7e35`.
 
 Constraints do real work rather than documenting intent — `turn_retrievals` has
 a CHECK forcing `was_cited` and `citation_marker` to agree, so a cited row
@@ -357,13 +366,56 @@ drop under the confidence floor at roughly the moment its score got low enough
 to be worth raising — and the cross-paper callback could never fire on the
 stale concepts it exists to surface. Confidence answers "how much did we
 observe", which does not shrink; the score answers "do they still know it",
-which does. (how many turns before a cross-paper callback may fire)
+which does.
 
-### 5.3 Frontend views not built
+### 5.3 Frontend views — memory and graph built
 
-Learner memory, concept graph, quiz. Deliberately deferred: building them
-against mocked data risked mocked views ending up in the demo video, which
-would undercut the grounding claim the whole project rests on.
+`MemoryPanel.jsx` ("What I remember", toggled from the session header) shows
+every concept with its decayed score, confidence, the style that has worked,
+and — expanded — the **evidence behind the score, each line linked to the turn
+it came from**. That is the "why do you think that?" answer, and it is the
+reason `observations` carries provenance at all.
+
+It also carries the correction control: two buttons that set
+`user_override_score` *and* write a `user_stated` observation, so a correction
+outranks inference and still joins the evidence trail rather than sitting
+outside it.
+
+`ConceptGraph.jsx` is the second tab. The layout is **deterministic** — nodes
+sit on a circle ordered by the data, not a force simulation, because a physics
+layout settles somewhere slightly different every run and this has to be
+pointed at during a recording. Cross-paper edges are drawn on the accent, which
+is what makes the §12 connection visible as a picture. It is presentational:
+the panel owns the fetch, so `verify/render.mjs` renders it from a fixture and
+asserts the same data draws the same picture.
+
+Still not built: a dedicated quiz view. Quizzes arrive in the turn stream by
+design (§15: "no direct route — agent-initiated only"), so what was needed was
+an affordance, not a screen — the header shows "Awaiting your answer" and the
+composer changes its placeholder when `activity = QUIZ_PENDING`.
+
+### 5.3b HTTP surface — §15 complete
+
+Every route the spec names now exists.
+
+| Route | Notes |
+| --- | --- |
+| `GET /api/memory/concepts` | Every concept met, decayed, best-evidenced first. Unfiltered by default — the confidence floor gates what the system *claims*, not what it shows |
+| `GET /api/memory/concepts/{id}` | Evidence with `turn_id` provenance — the "why do you think that?" answer |
+| `PATCH /api/memory/concepts/{id}` | Sets `user_override_score` **and** writes a `user_stated` observation, so a correction outranks inference and still joins the evidence trail |
+| `GET /api/memory/graph` | Typed, directed, confidence-weighted edges, each drawn once |
+| `GET /api/turns/{id}/citations` | The §6.5 fix |
+| `POST /api/feedback` | Moves a standing preference, or records evidence |
+| `GET /api/debug/sessions/{id}` | The transparency panel |
+| `GET /api/debug/feedback` | Feedback with the turn each piece changed |
+
+**Feedback changes the next turn, verifiably.** `too_basic` / `too_advanced`
+move `users.preferences.depth` one notch (never to an extreme); that becomes an
+instruction fragment on the *next* turn, and `apply_pending()` stamps
+`applied_to_turn_id` once that turn exists. Verified live: `too_basic` → depth
+`detailed` → stamped onto turn `45633088`. Thumbs-up/down deliberately move
+nothing — a single not-helpful is evidence, not a mandate to retune how
+someone is taught, and `applied` reports that honestly rather than flattering.
 
 ### 5.4 Deployment and infrastructure
 
@@ -450,20 +502,29 @@ searches per question, model latency, and full generation completing before
 verification and streaming begin. The stepper keeps the pane alive, but this is
 not demo-viable. **Profile before the video.**
 
-### 6.4 🟠 Transient 503s from the model
+### 6.4 🟠 Transient model unavailability
 
-`gemini-3.6-flash` returned `503 UNAVAILABLE` on 2 of 3 attempts in the most
-recent session. The failure path is correct — typed `agent_unavailable`, fails
-closed, nothing persisted, renders as a proper error card — but the demo needs
-either a retry policy or a warmed-up rehearsal.
+Two shapes of the same problem. On AI Studio, `gemini-3.6-flash` returned
+`503 UNAVAILABLE` on 2 of 3 attempts. On Vertex, `gemini-3.5-flash` has
+returned `429 RESOURCE_EXHAUSTED` twice during live runs — once mid-demo,
+recovering on an immediate retry.
 
-### 6.5 🟡 Reloaded transcripts have inert citation pills
+The failure path is correct either way: typed `agent_unavailable`, fails
+closed, nothing persisted, renders as a proper error card. But the demo still
+needs a retry policy or a warmed-up rehearsal, because a 429 on camera looks
+identical to a broken product.
 
-`GET /api/sessions/{id}/messages` returns no citation payload and no endpoint
-lists a turn's citations after the fact, so a reload has no `chunk_id` to click
-through to. Mitigated by a localStorage cache. **Proper fix:** add
-`GET /api/turns/{turn_id}/citations`. Not done because it was outside the one
-backend change that had been authorized.
+### 6.5 ✅ RESOLVED — reloaded transcripts had inert citation pills
+
+Fixed properly. `GET /api/turns/{turn_id}/citations` returns a turn's verified
+citations — the same `was_cited` rows the verifier wrote, in marker order, with
+the section path and page span the overlay needs. The SPA reads it on load and
+falls back to the localStorage cache only when that request fails.
+
+The cache is now a fallback, not the answer. Before this, a transcript opened
+on a second machine had inert markers, because only the live `citations` event
+carried a `chunk_id`. `verify:live` asserts the recovered markers match what
+was streamed and that each one can be clicked through.
 
 ---
 
@@ -518,7 +579,7 @@ Run all of these after any change. This is the established gate.
 
 ```bash
 # Backend
-pytest                        # expect 326 passed
+pytest                        # expect 363 passed
 ruff check .
 alembic check                 # expect: No new upgrade operations detected
 

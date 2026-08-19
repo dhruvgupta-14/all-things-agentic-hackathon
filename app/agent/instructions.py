@@ -90,8 +90,9 @@ def build_instruction(
     *,
     memory_summary: str | None = None,
     callback_hint: str | None = None,
+    depth_hint: str | None = None,
 ) -> str:
-    """The standing instruction, the open paper, memory, and any callback."""
+    """The standing instruction, the open paper, memory, callback and depth."""
     instruction = SYSTEM_INSTRUCTION
 
     if paper_title:
@@ -113,5 +114,12 @@ def build_instruction(
     # is the only part the model is asked to solve.
     if callback_hint:
         instruction += f"\n\nCONNECT THIS TO WHAT THEY LEARNED BEFORE\n{callback_hint}"
+
+    # A standing preference the reader set explicitly, through feedback. It
+    # goes into the instruction rather than being applied to the answer
+    # afterwards: rewriting a composed answer to be simpler is how you get an
+    # answer that no longer matches the citations attached to it.
+    if depth_hint:
+        instruction += f"\n\nHOW THIS READER HAS ASKED TO BE TAUGHT\n{depth_hint}"
 
     return instruction

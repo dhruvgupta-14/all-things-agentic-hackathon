@@ -4,6 +4,7 @@ import { api } from './api/client'
 import { CitationPanel } from './components/CitationPanel'
 import { Composer } from './components/Composer'
 import { Conversation } from './components/Conversation'
+import { MemoryPanel } from './components/MemoryPanel'
 import { Rail } from './components/Rail'
 import { useConversation } from './hooks/useConversation'
 import { usePapers } from './hooks/usePapers'
@@ -23,6 +24,7 @@ export default function App() {
 
   const [sessionId, setSessionId] = useState(null)
   const [open, setOpen] = useState(null)
+  const [memoryOpen, setMemoryOpen] = useState(false)
 
   // Identity is established once; it also provisions the user row on first run.
   useEffect(() => {
@@ -100,10 +102,27 @@ export default function App() {
                 {session?.turn_count ?? 0} turn
                 {(session?.turn_count ?? 0) === 1 ? '' : 's'}
               </span>
+              {/* The reader has to know their next message is graded, not asked. */}
+              {session?.activity === 'QUIZ_PENDING' && (
+                <span className="rounded border border-accent/40 bg-accent-soft px-1.5 py-0.5 text-[11px] text-accent-ink">
+                  Awaiting your answer
+                </span>
+              )}
             </>
           ) : (
             <h2 className="text-[13px] text-faint">No session open</h2>
           )}
+
+          <button
+            type="button"
+            onClick={() => setMemoryOpen((value) => !value)}
+            aria-pressed={memoryOpen}
+            className={`ml-auto shrink-0 rounded px-2 py-1 text-[12px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${
+              memoryOpen ? 'bg-accent-soft text-accent-ink' : 'text-muted hover:text-ink'
+            }`}
+          >
+            What I remember
+          </button>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -130,11 +149,17 @@ export default function App() {
             streaming={streaming}
             onSend={send}
             placeholder={
-              paper ? `Ask about ${paper.title ?? 'this paper'}…` : 'Ask a question…'
+              session?.activity === 'QUIZ_PENDING'
+                ? 'Answer the question above…'
+                : paper
+                  ? `Ask about ${paper.title ?? 'this paper'}…`
+                  : 'Ask a question…'
             }
           />
         )}
       </main>
+
+      <MemoryPanel open={memoryOpen} onClose={() => setMemoryOpen(false)} />
 
       <CitationPanel
         open={Boolean(open)}

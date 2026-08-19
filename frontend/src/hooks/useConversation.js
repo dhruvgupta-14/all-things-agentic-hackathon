@@ -65,27 +65,44 @@ export function useConversation(sessionId, { onTurnComplete } = {}) {
 
     api
       .getMessages(sessionId)
-      .then((transcript) => {
+      .then(async (transcript) => {
         if (cancelled) return
+        const shown = transcript.filter(
+          (m) => m.role === 'user' || m.role === 'assistant',
+        )
+
+        // Citations come from the server, which is the only place they are
+        // authoritative — the local cache is a fallback for when that request
+        // fails, not the source of truth it used to be. Without this a
+        // transcript opened on another machine had inert markers.
+        const restored = await Promise.all(
+          shown.map(async (m) => {
+            if (m.role !== 'assistant' || !m.turn_id) return []
+            try {
+              const body = await api.getTurnCitations(m.turn_id)
+              return body.citations ?? []
+            } catch {
+              return recallCitations(m.turn_id)
+            }
+          }),
+        )
+        if (cancelled) return
+
         setMessages(
-          transcript
-            .filter((m) => m.role === 'user' || m.role === 'assistant')
-            .map((m) => ({
-              key: m.message_id,
-              role: m.role,
-              content: m.content,
-              turnId: m.turn_id,
-              // Absent from the transcript endpoint; restored from the local
-              // cache when this browser has seen the turn before.
-              citations: m.role === 'assistant' ? recallCitations(m.turn_id) : [],
-              memory: [],
-              phases: [],
-              tools: [],
-              grounding: null,
-              latencyMs: null,
-              streaming: false,
-              error: null,
-            })),
+          shown.map((m, index) => ({
+            key: m.message_id,
+            role: m.role,
+            content: m.content,
+            turnId: m.turn_id,
+            citations: restored[index],
+            memory: [],
+            phases: [],
+            tools: [],
+            grounding: null,
+            latencyMs: null,
+            streaming: false,
+            error: null,
+          })),
         )
       })
       .finally(() => {

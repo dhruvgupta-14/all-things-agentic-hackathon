@@ -321,6 +321,39 @@ class MemoryService:
 
         return records
 
+    async def all_for_user(
+        self, user_id: uuid.UUID, *, limit: int = 300
+    ) -> list[MemoryRecord]:
+        """Every concept this reader has met, decayed, best-evidenced first.
+
+        Distinct from `lookup()`'s no-argument branch, which applies the 0.3
+        confidence floor because it answers "what are they weak at" — a
+        question that must not be answered from thin evidence. This one
+        answers "what have they met", where a concept with no evidence yet is
+        a legitimate row: the reader should be able to see the graph the
+        system built from their papers, not only the parts it has opinions
+        about.
+        """
+        concepts = list(
+            (
+                await self._session.scalars(
+                    select(Concept)
+                    .where(
+                        Concept.user_id == user_id,
+                        Concept.merged_into_id.is_(None),
+                    )
+                    .order_by(
+                        Concept.evidence_count.desc(),
+                        Concept.understanding_score.asc().nullslast(),
+                        Concept.canonical_name,
+                    )
+                    .limit(limit)
+                )
+            ).all()
+        )
+        now = datetime.now(UTC)
+        return [self._to_record(concept, now) for concept in concepts]
+
     async def lookup(
         self,
         user_id: uuid.UUID,

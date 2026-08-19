@@ -1,15 +1,18 @@
 /**
  * Client-side cache of each turn's citation set, keyed by turn_id.
  *
- * `GET /api/sessions/{id}/messages` returns role, content and turn_id — it has
- * no citation payload, and there is no endpoint that lists a turn's citations
- * after the fact. So without this, reloading the page would leave every marker
- * in the transcript inert: the click-through needs a chunk_id, and only the
- * live `citations` event carries one.
+ * **Fallback only.** `GET /api/turns/{turn_id}/citations` is the authoritative
+ * source and is what a reloaded transcript reads; this covers the case where
+ * that request fails, so a flaky network degrades to a stale-but-clickable
+ * pill rather than an inert one.
  *
- * This is a convenience, not a source of truth. A marker with no cached entry
- * still renders — it is simply not clickable — so a cleared cache degrades to
- * the honest state rather than to a broken one.
+ * It used to be the only answer, back when the transcript endpoint carried no
+ * citation payload and nothing listed a turn's citations after the fact. That
+ * left markers inert on any machine that had not seen the turn live.
+ *
+ * Still not a source of truth. A marker with no entry anywhere still renders —
+ * it is simply not clickable — so a cleared cache degrades to the honest state
+ * rather than to a broken one.
  */
 
 const KEY = 'citations:v1'

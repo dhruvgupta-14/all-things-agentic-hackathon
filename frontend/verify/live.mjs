@@ -145,5 +145,18 @@ check('the assistant message matches what was streamed',
 check('the assistant message carries the turn_id',
   transcript[1].turn_id === done.turn_id)
 
+// A reload has to restore clickable pills from the server, not from this
+// browser's localStorage — otherwise the transcript is inert on any other
+// machine, which is what HANDOFF 6.5 recorded as a defect.
+const rehydrated = await api.getTurnCitations(done.turn_id)
+check('a reloaded turn recovers its citations from the server',
+  rehydrated.citations.length === citations.length,
+  `${rehydrated.citations.length} vs ${citations.length} streamed`)
+check('the recovered markers match what was streamed',
+  rehydrated.citations.map((c) => c.marker).sort().join(',') ===
+    citations.map((c) => c.marker).sort().join(','))
+check('every recovered citation carries a chunk_id to click through to',
+  rehydrated.citations.every((c) => Boolean(c.chunk_id) && Boolean(c.section_path)))
+
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILED`)
 process.exit(failures === 0 ? 0 : 1)

@@ -55,14 +55,12 @@ def scripted_agent(monkeypatch):
             user_message,
             paper_title,
             session_key,
-            memory_summary=None,
-            callback_hint=None,
+            **hints,
         ):
             captured["history"] = history
             captured["user_message"] = user_message
             captured["paper_title"] = paper_title
-            captured["memory_summary"] = memory_summary
-            captured["callback_hint"] = callback_hint
+            captured.update(hints)
             if call_tool:
                 tool = _tool_for(context)
                 await tool("attention weights tokens")

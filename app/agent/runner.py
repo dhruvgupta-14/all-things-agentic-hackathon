@@ -80,6 +80,7 @@ def build_agent(
     *,
     memory_summary: str | None = None,
     callback_hint: str | None = None,
+    depth_hint: str | None = None,
 ) -> LlmAgent:
     """One agent, scoped to one turn.
 
@@ -105,6 +106,7 @@ def build_agent(
             paper_title,
             memory_summary=memory_summary,
             callback_hint=callback_hint,
+            depth_hint=depth_hint,
         ),
         tools=tools,
         before_tool_callback=build_scope_guard(context),
@@ -141,6 +143,7 @@ async def run_turn(
     session_key: str,
     memory_summary: str | None = None,
     callback_hint: str | None = None,
+    depth_hint: str | None = None,
 ) -> AgentOutcome:
     """Run one turn and return the composed draft.
 
@@ -154,6 +157,7 @@ async def run_turn(
         paper_title,
         memory_summary=memory_summary,
         callback_hint=callback_hint,
+        depth_hint=depth_hint,
     )
     session_service = InMemorySessionService()
     runner = Runner(

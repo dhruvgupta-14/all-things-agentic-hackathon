@@ -54,11 +54,9 @@ def agent(monkeypatch):
             user_message,
             paper_title,
             session_key,
-            memory_summary=None,
-            callback_hint=None,
+            **hints,
         ):
-            captured["memory_summary"] = memory_summary
-            captured["callback_hint"] = callback_hint
+            captured.update(hints)
             captured["paper_scope"] = list(context.paper_scope)
             from app.agent.tools import (
                 build_record_learning_signal,

@@ -26,6 +26,20 @@ class Settings(BaseSettings):
     # closed rather than opening a hole.
     auth_dev_bypass_subject: str | None = None
 
+    # Cloud SQL, as an instance connection name: `project:region:instance`.
+    # Unset for every local run, where `DB_HOST`/`DB_PORT` reach Postgres in
+    # Docker directly. Set, it switches both engines onto the Cloud SQL Python
+    # connector, which handles TLS and IAM without a proxy sidecar or a
+    # long-lived certificate.
+    #
+    # The unix socket at /cloudsql/<instance> is the other supported route on
+    # Cloud Run and needs no code at all — leave this unset and point DB_HOST
+    # at the socket path. The connector is preferred because it also works
+    # from a laptop, which is where the pre-deploy `alembic upgrade head` runs.
+    cloud_sql_instance: str | None = None
+    # PUBLIC unless the instance is on a VPC, in which case PRIVATE.
+    cloud_sql_ip_type: str = "PUBLIC"
+
     # Object storage. Local development writes to a directory; deployment sets
     # storage_bucket and the GCS backend takes over.
     storage_bucket: str | None = None
@@ -90,7 +104,25 @@ class Settings(BaseSettings):
         return bool(self.vertex_project or self.gemini_api_key)
 
     @property
+    def uses_cloud_sql(self) -> bool:
+        """Is this deployment talking to Cloud SQL through the connector?
+
+        Set `CLOUD_SQL_INSTANCE` to an instance connection name
+        (`project:region:instance`) to switch. Unset — every local run — keeps
+        the plain host:port DSN and never imports the connector.
+        """
+        return bool(self.cloud_sql_instance)
+
+    @property
     def database_url(self) -> str:
+        """The async DSN.
+
+        Over the Cloud SQL connector the host and port are supplied by the
+        connector itself, so the URL carries only the driver: SQLAlchemy is
+        handed an `async_creator` and never dials anything directly.
+        """
+        if self.uses_cloud_sql:
+            return "postgresql+asyncpg://"
         return (
             f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
@@ -99,6 +131,8 @@ class Settings(BaseSettings):
     @property
     def sync_database_url(self) -> str:
         """Alembic runs its migrations synchronously, over psycopg."""
+        if self.uses_cloud_sql:
+            return "postgresql+psycopg://"
         return (
             f"postgresql+psycopg://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"

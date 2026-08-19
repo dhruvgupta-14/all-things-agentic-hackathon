@@ -173,15 +173,36 @@ def check_database() -> None:
             "filtered vector queries silently return nothing at scale",
         )
 
+    from app.config import get_settings
+
+    settings = get_settings()
+    if settings.uses_cloud_sql:
+        ok("Cloud SQL connector configured", settings.cloud_sql_instance)
+        if settings.cloud_sql_instance.count(":") == 2:
+            ok("instance connection name looks right", "project:region:instance")
+        else:
+            fail(
+                "CLOUD_SQL_INSTANCE is not project:region:instance",
+                settings.cloud_sql_instance,
+            )
+        if settings.database_url == "postgresql+asyncpg://":
+            ok("no host in the DSN — the connector supplies it")
+        else:
+            fail("a host survived in the DSN", "it would dial somewhere else")
+    else:
+        warn(
+            "CLOUD_SQL_INSTANCE unset",
+            "fine locally; set it to project:region:instance when deploying",
+        )
+
     print(
         "  [NOTE] Cloud SQL needs the `random_page_cost` database flag set to\n"
         "         1.1 as well — the per-connection setting covers the app, not\n"
         "         psql sessions or anything else that connects."
     )
     print(
-        "  [NOTE] `database_url` builds a host:port DSN. Cloud SQL over the\n"
-        "         connector or a unix socket is NOT wired up yet; that is real\n"
-        "         deployment work, not configuration."
+        "  [NOTE] The service account needs roles/cloudsql.client, which\n"
+        "         provision_gcp.sh already grants."
     )
 
 

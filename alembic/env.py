@@ -34,11 +34,28 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    settings = get_settings()
+
+    if settings.uses_cloud_sql:
+        # The connector supplies the connection, so there is no host in the
+        # URL to dial. This is why migrations use the connector rather than
+        # Cloud Run's unix socket: `alembic upgrade head` has to run *before*
+        # the revision that needs it exists, from wherever the operator is.
+        from sqlalchemy import create_engine
+
+        from app.db.cloud_sql import sync_creator
+
+        connectable = create_engine(
+            settings.sync_database_url,
+            creator=sync_creator(settings),
+            poolclass=pool.NullPool,
+        )
+    else:
+        connectable = engine_from_config(
+            config.get_section(config.config_ini_section, {}),
+            prefix="sqlalchemy.",
+            poolclass=pool.NullPool,
+        )
 
     with connectable.connect() as connection:
         context.configure(

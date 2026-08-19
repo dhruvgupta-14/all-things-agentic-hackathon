@@ -37,11 +37,35 @@ SERVER_SETTINGS = {
     "hnsw.iterative_scan": "strict_order",
 }
 
-engine = create_async_engine(
-    settings.database_url,
-    echo=False,
-    connect_args={"server_settings": SERVER_SETTINGS},
-)
+def _build_engine():
+    """One engine, reaching the database whichever way this deployment does.
+
+    `SERVER_SETTINGS` travels either way — those settings are the difference
+    between a correct query plan and a silently wrong one, and they must not
+    depend on how the connection was established.
+    """
+    if settings.uses_cloud_sql:
+        from app.db.cloud_sql import async_creator
+
+        return create_async_engine(
+            settings.database_url,
+            echo=False,
+            async_creator=async_creator(settings),
+            connect_args={"server_settings": SERVER_SETTINGS},
+            # Cloud SQL closes idle connections, and a pooled-but-dead one
+            # surfaces as a failed turn rather than a reconnect.
+            pool_pre_ping=True,
+            pool_recycle=1800,
+        )
+
+    return create_async_engine(
+        settings.database_url,
+        echo=False,
+        connect_args={"server_settings": SERVER_SETTINGS},
+    )
+
+
+engine = _build_engine()
 
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 

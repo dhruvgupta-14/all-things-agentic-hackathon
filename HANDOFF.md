@@ -37,7 +37,7 @@ Everything below was verified on 2026-08-20.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Backend tests | `pytest` | **383 passed** |
+| Backend tests | `pytest` | **387 passed** |
 | Lint | `ruff check .` | clean |
 | Migration drift | `alembic check` | no drift |
 | Frontend build | `npm run build` | clean |
@@ -446,12 +446,21 @@ PYTHONPATH=. python scripts/preflight_deploy.py
 > `VertexEmbedder`, a class that has never existed; it now uses
 > `get_embedder()` and says what a `HashingEmbedder` result means.
 
+**Cloud SQL is wired up** (`app/db/cloud_sql.py`). Set `CLOUD_SQL_INSTANCE` to
+`project:region:instance` and both engines switch onto the connector — the
+application's async one on asyncpg, and Alembic's synchronous one on psycopg.
+Unset, which is every local run, nothing changes and the connector is never
+imported.
+
+The connector rather than Cloud Run's unix socket, because that socket only
+exists inside a revision and `alembic upgrade head` has to run *before* the
+revision that needs it. The connector works from a laptop and from Cloud Run,
+so migrations and the running service reach the database the same way.
+`pool_pre_ping` is on: Cloud SQL drops idle connections, and a pooled-but-dead
+one would surface as a failed turn rather than a reconnect.
+
 **Still real work, deliberately not started:**
 
-- **Cloud SQL is not wired up.** `settings.database_url` builds a `host:port`
-  DSN. Cloud SQL wants the Python connector or a unix socket, and
-  `cloud-sql-python-connector` is in `requirements.txt` but unused. This is
-  code, not configuration.
 - Migrations do not run on boot, on purpose. `alembic upgrade head` is a
   deliberate step before the first deploy of a revision.
 - Background ingestion still uses FastAPI `BackgroundTasks`, not Cloud Tasks.
@@ -642,7 +651,7 @@ Run all of these after any change. This is the established gate.
 
 ```bash
 # Backend
-pytest                        # expect 383 passed
+pytest                        # expect 387 passed
 ruff check .
 alembic check                 # expect: No new upgrade operations detected
 
@@ -696,16 +705,13 @@ surface, the memory and graph views, §6.5, and §6.3 (median ~34s, down from
 56-70s). CORE is essentially complete; what is left is deployment and the
 recording.
 
-1. **Wire up Cloud SQL.** The only remaining piece of real deployment code —
-   `database_url` builds a `host:port` DSN and Cloud SQL needs the connector or
-   a unix socket. Everything else for Phase 3 is prepared (§5.4).
-2. **Deploy.** `preflight_deploy.py` first, then `provision_gcp.sh`, then
+1. **Deploy.** `preflight_deploy.py` first, then `provision_gcp.sh`, then
    `alembic upgrade head` against Cloud SQL, then `gcloud run deploy`. Grant
    `roles/run.invoker` afterwards or Cloud Tasks pushes will 403.
-3. **Firebase Auth**, and decide the judge access method (§20 decision 4 — the
+2. **Firebase Auth**, and decide the judge access method (§20 decision 4 — the
    default is a shared demo account with published credentials).
-4. **Rehearse the demo.** Run `verify_callback.py` first: the cross-paper
+3. **Rehearse the demo.** Run `verify_callback.py` first: the cross-paper
    callback cannot fire on a fresh database and that is correct. Budget for
    429s — one retry is built in now, but sustained rate limiting still fails
    turns, and it will not look like rate limiting on camera.
-5. Host the SPA. It is not in the container image, by design.
+4. Host the SPA. It is not in the container image, by design.

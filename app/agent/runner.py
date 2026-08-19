@@ -26,6 +26,10 @@ from google.genai import types
 from app.agent.instructions import build_instruction
 from app.agent.tools import (
     TurnToolContext,
+    build_generate_quiz,
+    build_get_concept_context,
+    build_record_learning_signal,
+    build_retrieve_learner_memory,
     build_retrieve_paper_context,
     build_scope_guard,
 )
@@ -70,14 +74,39 @@ def _configure_transport() -> None:
         os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
 
 
-def build_agent(context: TurnToolContext, paper_title: str | None) -> LlmAgent:
-    """One agent, scoped to one turn."""
+def build_agent(
+    context: TurnToolContext,
+    paper_title: str | None,
+    *,
+    memory_summary: str | None = None,
+    callback_hint: str | None = None,
+) -> LlmAgent:
+    """One agent, scoped to one turn.
+
+    Memory tools are only attached when the services behind them exist, so a
+    turn running without learner memory offers the agent nothing it cannot
+    actually do rather than a tool that always returns an apology.
+    """
     settings = get_settings()
+
+    tools = [build_retrieve_paper_context(context)]
+    if context.memory is not None:
+        tools.append(build_retrieve_learner_memory(context))
+        tools.append(build_get_concept_context(context))
+    if context.signals is not None:
+        tools.append(build_record_learning_signal(context))
+    if context.quizzes is not None and context.conversation is not None:
+        tools.append(build_generate_quiz(context))
+
     return LlmAgent(
         name="reading_companion",
         model=settings.gemini_model,
-        instruction=build_instruction(paper_title),
-        tools=[build_retrieve_paper_context(context)],
+        instruction=build_instruction(
+            paper_title,
+            memory_summary=memory_summary,
+            callback_hint=callback_hint,
+        ),
+        tools=tools,
         before_tool_callback=build_scope_guard(context),
     )
 
@@ -110,6 +139,8 @@ async def run_turn(
     user_message: str,
     paper_title: str | None,
     session_key: str,
+    memory_summary: str | None = None,
+    callback_hint: str | None = None,
 ) -> AgentOutcome:
     """Run one turn and return the composed draft.
 
@@ -118,7 +149,12 @@ async def run_turn(
     """
     _configure_transport()
 
-    agent = build_agent(context, paper_title)
+    agent = build_agent(
+        context,
+        paper_title,
+        memory_summary=memory_summary,
+        callback_hint=callback_hint,
+    )
     session_service = InMemorySessionService()
     runner = Runner(
         agent=agent, app_name=APP_NAME, session_service=session_service

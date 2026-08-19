@@ -48,10 +48,21 @@ def scripted_agent(monkeypatch):
     captured: dict = {}
 
     def script(draft: str, *, call_tool: bool = True):
-        async def fake_run_turn(*, context, history, user_message, paper_title, session_key):
+        async def fake_run_turn(
+            *,
+            context,
+            history,
+            user_message,
+            paper_title,
+            session_key,
+            memory_summary=None,
+            callback_hint=None,
+        ):
             captured["history"] = history
             captured["user_message"] = user_message
             captured["paper_title"] = paper_title
+            captured["memory_summary"] = memory_summary
+            captured["callback_hint"] = callback_hint
             if call_tool:
                 tool = _tool_for(context)
                 await tool("attention weights tokens")

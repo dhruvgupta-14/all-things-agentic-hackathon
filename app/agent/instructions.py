@@ -44,15 +44,74 @@ SEARCHING
 One good search usually beats three narrow ones. If a search comes back empty
 or off-target, try different wording once — then tell the reader what you could
 not find rather than searching again.
+
+WHAT YOU REMEMBER ABOUT THIS READER
+
+You may be given notes on concepts this reader has met before: a score from 0
+to 1, how confident that score is, and which explanation style has worked for
+them. This comes from recorded evidence, not from a transcript.
+
+Use it, do not perform it. Lead with the style that has worked before rather
+than announcing that you are doing so. Never open with "I remember that you…".
+
+Only refer to a past struggle when the score is low AND the confidence is at
+least 0.3. A low score with low confidence means you have barely any evidence —
+that is a reason to ask how familiar they are, never a reason to tell them they
+found something hard.
+
+If you have no notes on a concept, you have never discussed it with them. Do
+not imply otherwise.
+
+NOTICING HOW IT IS GOING
+
+Call `record_learning_signal` when the reader shows something worth
+remembering: they say they are lost, something clicks, or they use a concept
+correctly themselves. Not every message contains a signal, and recording noise
+makes the memory worse. One signal per genuine moment.
+
+You report what happened. The score is computed from it — you do not set it.
+
+CHECKING WHETHER SOMETHING LANDED
+
+`generate_quiz` puts one grounded question to the reader and puts the
+conversation into a state where their next message is graded against a stored
+rubric. Use it after you have explained something and want to know whether it
+landed — not to open a conversation.
+
+If it comes back saying a check is not allowed right now, that is a decision,
+not a hint. **Do not write a question of your own instead.** A question you ask
+in passing is not recorded, not graded, and not part of what the system knows
+about this reader — it only looks like a check. Carry on explaining.
 """
 
 
-def build_instruction(paper_title: str | None) -> str:
-    """The standing instruction, plus which paper is open."""
-    if not paper_title:
-        return SYSTEM_INSTRUCTION
-    return (
-        f"{SYSTEM_INSTRUCTION}\n"
-        f"The reader currently has this paper open: {paper_title!r}. "
-        f"`retrieve_paper_context` searches it."
-    )
+def build_instruction(
+    paper_title: str | None,
+    *,
+    memory_summary: str | None = None,
+    callback_hint: str | None = None,
+) -> str:
+    """The standing instruction, the open paper, memory, and any callback."""
+    instruction = SYSTEM_INSTRUCTION
+
+    if paper_title:
+        instruction += (
+            f"\nThe reader currently has this paper open: {paper_title!r}. "
+            f"`retrieve_paper_context` searches it."
+        )
+
+    if memory_summary:
+        instruction += (
+            "\n\nWHAT YOU ALREADY KNOW ABOUT THIS READER\n"
+            "Retrieved before this turn began, from recorded evidence:\n"
+            f"{memory_summary}"
+        )
+
+    # Whether a callback is *allowed* was decided deterministically before this
+    # instruction was built — rate limit, weakness filter and the grant on the
+    # earlier paper are all settled. What is left is a language problem, which
+    # is the only part the model is asked to solve.
+    if callback_hint:
+        instruction += f"\n\nCONNECT THIS TO WHAT THEY LEARNED BEFORE\n{callback_hint}"
+
+    return instruction

@@ -3,13 +3,15 @@
  *
  * The stepper is append-only: a row appears when its `state` event actually
  * arrives, and the row above it flips to done. Nothing is shown speculatively.
- * That matters because the pipeline does not currently emit every phase —
- * `consulting_memory` never fires, since no tool reads learner memory yet, and
- * a checklist that ticked off "consulting memory" would be claiming work that
- * did not happen.
+ * A checklist that ticked off "consulting memory" on a turn that consulted
+ * nothing would be claiming work that did not happen — so the rule is that the
+ * event is the evidence, and no row is ever rendered in advance of one.
  *
- * Labels for the unemitted phases are defined anyway, so that when those tools
- * land their events render without a frontend change.
+ * `consulting_memory` now fires: the pipeline prefetches learner memory
+ * unconditionally on every turn. `composing` still does not, because the agent
+ * loop and composition are one step and there is no separate event to hang it
+ * on. Its label stays defined so that if that ever splits, it renders without
+ * a frontend change.
  */
 
 export const PHASE_LABELS = {

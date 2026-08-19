@@ -101,10 +101,20 @@ async def test_the_suite_makes_no_real_model_calls():
     from app.services.adjudication import ConservativeAdjudicator, get_adjudicator
     from app.services.analysis import HeuristicAnalyzer, get_analyzer
     from app.services.embeddings import HashingEmbedder, get_embedder
+    from app.services.quizzes import (
+        StubGrader,
+        StubQuizAuthor,
+        get_grader,
+        get_quiz_author,
+    )
 
     assert isinstance(get_embedder(), HashingEmbedder)
     assert isinstance(get_analyzer(), HeuristicAnalyzer)
     assert isinstance(get_adjudicator(), ConservativeAdjudicator)
+    # Every model-calling factory belongs here. A new one that forgets to add
+    # itself is exactly how the suite starts quietly spending quota again.
+    assert isinstance(get_quiz_author(), StubQuizAuthor)
+    assert isinstance(get_grader(), StubGrader)
 
 
 def test_the_suite_does_not_require_the_demo_pdfs():

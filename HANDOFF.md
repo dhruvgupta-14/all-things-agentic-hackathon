@@ -37,7 +37,7 @@ Everything below was verified on 2026-08-19 on the origin machine.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Backend tests | `pytest` | **252 passed** |
+| Backend tests | `pytest` | **326 passed** |
 | Lint | `ruff check .` | clean |
 | Migration drift | `alembic check` | no drift |
 | Frontend build | `npm run build` | clean |
@@ -183,7 +183,7 @@ distance between two models' vectors is still a number and still sorts, so
 nothing here can be left to a runtime exception. `scripts/reindex.py` migrates
 them; `GET /api/papers` surfaces `needs_reindex`.
 
-### 4.4 Agent (tools 1 of 5)
+### 4.4 Agent (all five tools — see §5.1)
 
 `app/agent/` on Google ADK 2.7.0.
 
@@ -273,19 +273,57 @@ Notable implementation points:
 
 Roughly in the order it should be tackled.
 
-### 5.1 Agent tools 2–5 — the largest remaining piece
+### 5.1 Agent tools — all five built
 
-| Tool | Blocks |
+| Tool | Where |
 | --- | --- |
-| `retrieve_learner_memory` | the `memory_used` SSE event is always empty; `turns.memory_read` is hardcoded `False` |
-| `get_concept_context` | the concept graph view; the §12 cross-paper callback |
-| `generate_quiz` | quiz UI; `sessions.activity = 'QUIZ_PENDING'` and `pending_quiz_id` are unused |
-| `record_learning_signal` | `observations` never gets written |
+| `retrieve_paper_context` | `app/agent/tools.py` |
+| `retrieve_learner_memory` | `app/services/memory.py` |
+| `get_concept_context` | same service, plus evidence and provenance |
+| `record_learning_signal` | `app/services/signals.py` |
+| `generate_quiz` | `app/services/quizzes.py` |
 
-§9.2 steps 3–4, 10 and 13 (quiz routing, memory prefetch, callback gate,
-learning signals) land with these tools. The pipeline currently records
-`memory_read = False`, which is honest rather than aspirational — keep it that
-way until the tool actually reads memory.
+Every §9.2 step is now implemented: **3** (deterministic `QUIZ_PENDING`
+routing, no classification call), **4** (unconditional memory prefetch),
+**10** (the callback gate), **13** (learning signals plus the backstop).
+
+`turns.memory_read`, `callback_concept_id` and `callback_suppressed_reason` are
+all derived from work that actually happened, never asserted. Every turn
+records either a callback concept or a suppression reason — there is no
+silent path. `consulting_memory` and `composing` both fire now, so five of six
+phases are real; `retrieving` is skipped on a grading turn, correctly.
+
+**Verified in real turns, not just tests:**
+
+- the §12 cross-paper callback — a reader who struggled with the
+  reparameterization trick in the VAE paper, asking about the simplified
+  training objective in the diffusion paper, got an answer that connected the
+  two, led with a numerical example (their `effective_style`), and carried
+  **two clickable citations into the earlier paper**. `agent_action=callback`,
+  `explanation_style=numerical`, retrievals recorded against both papers.
+- the §11 adaptive check — quiz authored and grounded, answered, graded
+  `partial` in **9s** (one constrained call, no agent loop), `quiz_partial`
+  observation written at weight 1.0 with attempt and turn provenance, score
+  moved 0.35 → 0.408, activity transitioned to `EXPLAINING`.
+
+`scripts/verify_callback.py` seeds §10.1's struggle-and-resolution and checks
+the gate without spending a model call. Run it before rehearsing the demo: the
+callback **cannot** fire on a fresh database, and that is correct — it needs a
+concept the reader has demonstrably struggled with.
+
+> **Signals are buffered, not written during the loop.** `observations` is
+> append-only and carries an FK to `turns`, and the turn row does not exist
+> until step 11 — so a signal written mid-loop could neither reference its turn
+> nor be updated to later. `SignalService.prepare()` validates and prices it;
+> the pipeline commits it at step 11. Do not "simplify" this into a direct
+> write: it would silently drop `observations.turn_id`, which §4.11 calls the
+> thing that makes memory inspectable.
+
+> **The candidate filter is narrow on purpose.** `_rank_candidates` excludes
+> only the *top* prefetch hit, not the whole prefetched set. A concept related
+> enough to be worth calling back to is usually similar enough to the question
+> that the ANN returns it too, so the broad rule suppresses exactly the
+> callbacks that should fire. This cost an hour once.
 
 ### 5.2 Constants — DECIDED, in `app/services/learner_state.py`
 
@@ -480,7 +518,7 @@ Run all of these after any change. This is the established gate.
 
 ```bash
 # Backend
-pytest                        # expect 252 passed
+pytest                        # expect 326 passed
 ruff check .
 alembic check                 # expect: No new upgrade operations detected
 

@@ -14,15 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Paper, User, UserPaperAccess
 from app.ingestion.pipeline import ingest_paper
-from app.services.embeddings import HashingEmbedder
 from app.services.retrieval import (
     RetrievalService,
     authorized_paper_scope,
     stale_paper_scope,
 )
-from app.services.storage import LocalStorage
 from scripts.reindex import find_stale
 from tests.conftest import build_pdf
+from tests.fakes import HashingEmbedder, InMemoryStorage
 
 PAGES = [
     "Attention Mechanisms\nAbstract\nScaled dot product attention aids translation.\n"
@@ -41,8 +40,8 @@ class OtherModelEmbedder(HashingEmbedder):
 
 
 @pytest.fixture
-def storage(storage_dir) -> LocalStorage:
-    return LocalStorage(storage_dir)
+def storage(storage_backend) -> InMemoryStorage:
+    return storage_backend
 
 
 @pytest.fixture
@@ -195,10 +194,10 @@ async def test_stale_scope_names_what_needs_reindexing(
 
 
 async def test_api_flags_a_paper_that_needs_reindexing(
-    client: AsyncClient, db_session: AsyncSession, dev_auth, storage, embedder
+    client: AsyncClient, db_session: AsyncSession, signed_in, storage, embedder
 ):
     await client.get("/api/me")
-    user = await db_session.scalar(select(User).where(User.auth_subject == dev_auth))
+    user = await db_session.scalar(select(User).where(User.auth_subject == signed_in))
     current = await _ingest(db_session, storage, embedder, user)
     stale = await _ingest(db_session, storage, OtherModelEmbedder(), user)
 

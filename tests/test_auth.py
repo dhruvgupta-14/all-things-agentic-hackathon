@@ -1,7 +1,9 @@
 """The authentication boundary.
 
-Identity must come from a verified token (or the explicitly gated local
-bypass) and nowhere else — ARCHITECTURE section 9.1.
+Identity comes from a verified Firebase token and nowhere else — ARCHITECTURE
+section 9.1. There is no second path: the development bypass that used to
+authenticate a configured subject with no token presented has been removed, and
+`test_there_is_no_authentication_bypass` guards against it coming back.
 """
 
 import pytest
@@ -21,8 +23,7 @@ async def test_health_needs_no_token(client: AsyncClient):
 
 
 @pytest.mark.parametrize("route", PROTECTED_ROUTES)
-async def test_missing_token_is_rejected(client: AsyncClient, route: str, settings_env):
-    settings_env(auth_dev_bypass_subject=None)
+async def test_missing_token_is_rejected(client: AsyncClient, route: str):
     response = await client.get(route)
     assert response.status_code == 401
     # Without the challenge header a browser client cannot know how to retry.
@@ -38,39 +39,49 @@ async def test_unconfigured_firebase_is_503_not_401(
     Returning 401 here would send clients into a pointless re-login loop
     against a server that cannot verify anything.
     """
-    settings_env(auth_dev_bypass_subject=None, firebase_project_id=None)
+    settings_env(firebase_project_id=None)
     response = await client.get(route, headers={"Authorization": "Bearer whatever"})
     assert response.status_code == 503
 
 
-async def test_bypass_refused_outside_local(client: AsyncClient, settings_env):
-    """A bypass subject set in a deployed environment fails closed."""
-    settings_env(app_env="production", auth_dev_bypass_subject="someone")
+async def test_there_is_no_authentication_bypass(client: AsyncClient, settings_env):
+    """The regression guard for the whole change.
+
+    A configured subject used to authenticate a request that carried no token,
+    gated on APP_ENV. Both settings are gone, and setting them must not revive
+    anything: pydantic refuses unknown fields, and the dependency has no branch
+    left to take. What a caller without a token gets is 401, full stop.
+    """
+    from app.config import Settings
+
+    assert not hasattr(Settings, "auth_dev_bypass_subject")
+    assert "auth_dev_bypass_subject" not in Settings.model_fields
+    assert "app_env" not in Settings.model_fields
+
     response = await client.get("/api/me")
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Authentication is misconfigured on this deployment."
+    assert response.status_code == 401
 
 
-async def test_bypass_authenticates_and_provisions_user(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+async def test_a_verified_token_provisions_a_user(
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     response = await client.get("/api/me")
     assert response.status_code == 200
 
     body = response.json()
-    assert body["auth_subject"] == dev_auth
-    assert body["email"] == f"{dev_auth}@local.invalid"
+    assert body["auth_subject"] == signed_in
+    assert body["email"] == f"{signed_in}@example.test"
     assert body["user_id"]
 
     stored = await db_session.scalar(
-        select(User).where(User.auth_subject == dev_auth)
+        select(User).where(User.auth_subject == signed_in)
     )
     assert stored is not None
     assert str(stored.user_id) == body["user_id"]
 
 
 async def test_repeat_login_reuses_the_same_user(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """Provisioning is once-per-subject, not once-per-request."""
     first = await client.get("/api/me")
@@ -79,12 +90,12 @@ async def test_repeat_login_reuses_the_same_user(
     assert first.json()["user_id"] == second.json()["user_id"]
 
     count = await db_session.scalar(
-        select(func.count()).select_from(User).where(User.auth_subject == dev_auth)
+        select(func.count()).select_from(User).where(User.auth_subject == signed_in)
     )
     assert count == 1
 
 
-async def test_papers_is_empty_for_a_new_user(client: AsyncClient, dev_auth: str):
+async def test_papers_is_empty_for_a_new_user(client: AsyncClient, signed_in: str):
     response = await client.get("/api/papers")
     assert response.status_code == 200
     assert response.json() == []

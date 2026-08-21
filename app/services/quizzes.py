@@ -163,12 +163,10 @@ class _GeminiCall:
     def __init__(
         self,
         model: str,
-        api_key: str | None = None,
-        project: str | None = None,
-        location: str | None = None,
+        project: str,
+        location: str,
     ) -> None:
         self._model = model
-        self._api_key = api_key
         self._project = project
         self._location = location
         self._client = None
@@ -184,7 +182,6 @@ class _GeminiCall:
             from app.services.genai_client import get_genai_client
 
             self._client = get_genai_client(
-                api_key=self._api_key,
                 project=self._project,
                 location=self._location,
             )
@@ -239,63 +236,32 @@ class GeminiGrader(_GeminiCall):
             raise GradingFailed(f"{type(exc).__name__}: {exc}") from exc
 
 
-class StubQuizAuthor:
-    """Deterministic, offline. Keeps the suite from spending quota."""
-
-    model_name = "stub-quiz-author"
-
-    def write(
-        self, *, concept: str, difficulty: str, passages: list[str]
-    ) -> AuthoredQuiz:
-        return AuthoredQuiz(
-            question=f"In your own words, what is {concept} and why does it matter here?",
-            must_mention=[concept, "why it matters"],
-        )
-
-
-class StubGrader:
-    """Lexical overlap, not judgement. Enough to exercise every branch."""
-
-    model_name = "stub-grader"
-
-    def grade(self, *, question: str, rubric: list[str], answer: str) -> Grading:
-        lowered = (answer or "").lower()
-        missing = [point for point in rubric if point.lower() not in lowered]
-        if not rubric:
-            grade = "partial"
-        elif not missing:
-            grade = "correct"
-        elif len(missing) == len(rubric):
-            grade = "incorrect"
-        else:
-            grade = "partial"
-        return Grading(grade=grade, missing_elements=missing, confidence=0.6)
-
-
 def get_quiz_author() -> QuizAuthor:
+    """One backend, no branch.
+
+    Called through the module rather than imported by name, so the test
+    harness has one place to substitute a deterministic fake.
+    """
     settings = get_settings()
-    if settings.vertex_project:
-        return GeminiQuizAuthor(
-            settings.gemini_model,
-            project=settings.vertex_project,
-            location=settings.vertex_location,
-        )
-    if settings.gemini_api_key:
-        return GeminiQuizAuthor(settings.gemini_model, api_key=settings.gemini_api_key)
-    return StubQuizAuthor()
+    return GeminiQuizAuthor(
+        settings.gemini_model,
+        project=settings.vertex_project,
+        location=settings.vertex_location,
+    )
 
 
 def get_grader() -> Grader:
+    """One backend, no branch.
+
+    Called through the module rather than imported by name, so the test
+    harness has one place to substitute a deterministic fake.
+    """
     settings = get_settings()
-    if settings.vertex_project:
-        return GeminiGrader(
-            settings.gemini_model,
-            project=settings.vertex_project,
-            location=settings.vertex_location,
-        )
-    if settings.gemini_api_key:
-        return GeminiGrader(settings.gemini_model, api_key=settings.gemini_api_key)
-    return StubGrader()
+    return GeminiGrader(
+        settings.gemini_model,
+        project=settings.vertex_project,
+        location=settings.vertex_location,
+    )
 
 
 # --------------------------------------------------------------------------

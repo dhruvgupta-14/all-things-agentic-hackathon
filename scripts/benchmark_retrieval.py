@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import random
 import time
 import uuid
@@ -24,7 +25,27 @@ import uuid
 from sqlalchemy import text
 
 from app.db.base import async_session_factory
-from app.services.embeddings import HashingEmbedder
+from app.db.models import EMBEDDING_DIM
+
+BENCHMARK_MODEL_NAME = "benchmark-synthetic-v1"
+
+
+def _synthetic_vector(text: str) -> list[float]:
+    """A deterministic unit vector for `text`.
+
+    This benchmark measures which *plan* the query planner picks once a scope
+    filter is applied. That depends on row counts, index shape and cost
+    constants — not on whether the vectors mean anything. So it makes its own
+    rather than calling `gemini-embedding-001` 5 000 times, which would take
+    minutes and cost money to answer a question about query planning.
+
+    Deterministic so a repeated run measures the same corpus.
+    """
+    rng = random.Random(text)
+    vector = [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
+    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+    return [value / norm for value in vector]
+
 
 # Every synthetic paper is marked with this, so cleanup is exact.
 BENCHMARK_TAG = "benchmark-corpus"
@@ -53,7 +74,6 @@ def _paragraph(rng: random.Random) -> str:
 
 async def seed(papers: int, chunks_per_paper: int, seed_value: int) -> None:
     rng = random.Random(seed_value)
-    embedder = HashingEmbedder()
     started = time.perf_counter()
 
     async with async_session_factory() as session:
@@ -73,7 +93,7 @@ async def seed(papers: int, chunks_per_paper: int, seed_value: int) -> None:
                     "hash": uuid.uuid4().hex + uuid.uuid4().hex[:32],
                     "uri": f"file://{BENCHMARK_TAG}/{paper_id}.pdf",
                     "title": f"{BENCHMARK_TAG} paper {index}",
-                    "model": embedder.model_name,
+                    "model": BENCHMARK_MODEL_NAME,
                 },
             )
             await session.execute(
@@ -86,7 +106,7 @@ async def seed(papers: int, chunks_per_paper: int, seed_value: int) -> None:
             )
 
             texts = [_paragraph(rng) for _ in range(chunks_per_paper)]
-            vectors = embedder.embed_batch(texts)
+            vectors = [_synthetic_vector(text) for text in texts]
             rows = [
                 {
                     "cid": uuid.uuid4(),
@@ -171,8 +191,7 @@ async def _explain(
 
 
 async def measure() -> None:
-    embedder = HashingEmbedder()
-    query = str(embedder.embed_query("attention transformer gradient embedding"))
+    query = str(_synthetic_vector("attention transformer gradient embedding"))
 
     async with async_session_factory() as session:
         stats = (

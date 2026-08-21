@@ -9,7 +9,6 @@ pydantic                     # data validation
 pydantic-settings            # reads config from environment variables
 sqlalchemy                   # ORM — talks to Postgres
 asyncpg                      # Postgres driver, async
-psycopg[binary]              # Postgres driver, sync — Alembic against local Postgres
 pg8000                       # Postgres driver, sync, pure Python — Alembic against
                              # Cloud SQL. The connector's psycopg path needs a unix
                              # socket, which Windows does not have.

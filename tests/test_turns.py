@@ -25,9 +25,8 @@ from app.db.models import (
 )
 from app.ingestion.pipeline import ingest_paper
 from app.schemas.sse import decode
-from app.services.embeddings import HashingEmbedder
-from app.services.storage import LocalStorage
 from tests.conftest import build_pdf
+from tests.fakes import HashingEmbedder, InMemoryStorage
 
 PAGES = [
     "Attention Mechanisms\nAbstract\nScaled dot product attention aids translation.\n"
@@ -38,8 +37,8 @@ PAGES = [
 
 
 @pytest.fixture
-def storage(storage_dir) -> LocalStorage:
-    return LocalStorage(storage_dir)
+def storage(storage_backend) -> InMemoryStorage:
+    return storage_backend
 
 
 @pytest.fixture
@@ -84,7 +83,7 @@ def _tool_for(context):
 
 
 async def _reader_with_paper(
-    db_session: AsyncSession, storage: LocalStorage, subject: str
+    db_session: AsyncSession, storage: InMemoryStorage, subject: str
 ) -> tuple[User, Paper, Session]:
     user = User(auth_subject=subject)
     db_session.add(user)
@@ -371,7 +370,7 @@ async def test_a_revoked_grant_empties_the_scope_at_read_time(
 
 
 async def test_creating_a_session_requires_a_readable_paper(
-    client: AsyncClient, db_session: AsyncSession, dev_auth
+    client: AsyncClient, db_session: AsyncSession, signed_in
 ):
     """An ungranted paper is a 404, not a 403 — a 403 confirms the id."""
     await client.get("/api/me")
@@ -388,7 +387,7 @@ async def test_creating_a_session_requires_a_readable_paper(
 
 
 async def test_a_session_belonging_to_someone_else_is_not_found(
-    client: AsyncClient, db_session: AsyncSession, dev_auth
+    client: AsyncClient, db_session: AsyncSession, signed_in
 ):
     await client.get("/api/me")
     stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
@@ -403,7 +402,7 @@ async def test_a_session_belonging_to_someone_else_is_not_found(
 
 
 async def test_a_session_can_be_opened_and_read_back(
-    client: AsyncClient, dev_auth
+    client: AsyncClient, signed_in
 ):
     created = await client.post("/api/sessions", json={})
     assert created.status_code == 201
@@ -417,7 +416,7 @@ async def test_a_session_can_be_opened_and_read_back(
 
 
 async def test_listing_sessions_returns_only_the_callers_own(
-    client: AsyncClient, db_session: AsyncSession, dev_auth
+    client: AsyncClient, db_session: AsyncSession, signed_in
 ):
     """The rail is built from this, so a leak here is a leak on screen."""
     await client.get("/api/me")
@@ -435,11 +434,11 @@ async def test_listing_sessions_returns_only_the_callers_own(
 
 
 async def test_a_listed_session_carries_the_paper_title(
-    client: AsyncClient, db_session: AsyncSession, dev_auth
+    client: AsyncClient, db_session: AsyncSession, signed_in
 ):
     """Otherwise the rail would need one request per row to label itself."""
     await client.get("/api/me")
-    user = await db_session.scalar(select(User).where(User.auth_subject == dev_auth))
+    user = await db_session.scalar(select(User).where(User.auth_subject == signed_in))
     paper = Paper(
         content_hash=uuid.uuid4().hex + uuid.uuid4().hex[:32],
         storage_uri=f"file://{uuid.uuid4()}.pdf",
@@ -459,7 +458,7 @@ async def test_a_listed_session_carries_the_paper_title(
 
 
 async def test_a_session_with_no_paper_lists_a_null_title(
-    client: AsyncClient, dev_auth
+    client: AsyncClient, signed_in
 ):
     """The outer join must not drop the row."""
     await client.post("/api/sessions", json={})
@@ -471,7 +470,7 @@ async def test_a_session_with_no_paper_lists_a_null_title(
 
 
 async def test_the_transcript_endpoint_returns_durable_history(
-    client: AsyncClient, dev_auth
+    client: AsyncClient, signed_in
 ):
     """What a page reload rebuilds from."""
     session_id = (await client.post("/api/sessions", json={})).json()["session_id"]

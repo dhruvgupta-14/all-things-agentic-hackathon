@@ -1,9 +1,8 @@
 """Give the published demo account everything the demo needs.
 
-All the local demo data belongs to `local-dev-user`, the dev-bypass identity.
-The moment the SPA requires a real login, a judge signs in as a *different*
-Firebase subject and lands in an empty library with no learner memory — no
-papers, no concepts, and a cross-paper callback that cannot fire.
+A judge signs in as a real Firebase account and must land in a library that
+already has papers, concepts and enough learner memory for the cross-paper
+callback to fire. A fresh account has none of that.
 
 This closes that gap:
 
@@ -36,6 +35,7 @@ from app.ingestion.pipeline import canonicalize_existing_paper
 from app.services.callbacks import SUPPRESSED_RATE_LIMITED, CallbackService
 from app.services.memory import MemoryService
 from app.services.signals import SignalService
+from scripts.demo_identity import DEMO_EMAIL as DEFAULT_EMAIL
 
 # Shared with `verify_callback.py` so the two scripts cannot drift into
 # seeding different scenarios. The pair is *discovered* rather than named:
@@ -43,8 +43,6 @@ from app.services.signals import SignalService
 # canonicalization, and hardcoding one turns ordinary variation into a
 # broken demo.
 from scripts.verify_callback import choose_callback_pair
-
-DEFAULT_EMAIL = "judge@research-companion.demo"
 
 
 def _ok(label: str, detail: str = "") -> None:

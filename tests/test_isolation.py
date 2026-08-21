@@ -17,6 +17,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Concept, Paper, User, UserPaperAccess
+from tests.fakes import (
+    ConservativeAdjudicator,
+    HashingEmbedder,
+    HeuristicAnalyzer,
+    StubGrader,
+    StubQuizAuthor,
+)
 
 
 async def test_the_database_is_never_empty_during_a_test(db_session: AsyncSession):
@@ -33,7 +40,7 @@ async def test_the_database_is_never_empty_during_a_test(db_session: AsyncSessio
 
 
 async def test_listing_papers_ignores_papers_this_user_was_not_granted(
-    client: AsyncClient, dev_auth: str
+    client: AsyncClient, signed_in: str
 ):
     """Papers exist. None are this user's. The list is empty."""
     await client.get("/api/me")
@@ -90,23 +97,18 @@ async def test_scoped_counts_are_exact_while_global_counts_are_not(
     assert everything > 1, "a global count sees data this test does not own"
 
 
-async def test_each_test_gets_its_own_auth_subject(dev_auth: str):
+async def test_each_test_gets_its_own_auth_subject(signed_in: str):
     """Sharing `local-dev-user` with a human developer leaks their uploads."""
-    assert dev_auth.startswith("test-")
-    assert dev_auth != "local-dev-user"
+    assert signed_in.startswith("test-")
+    assert signed_in != "local-dev-user"
 
 
 async def test_the_suite_makes_no_real_model_calls():
     """`pytest` must be runnable offline and must not spend API quota."""
-    from app.services.adjudication import ConservativeAdjudicator, get_adjudicator
-    from app.services.analysis import HeuristicAnalyzer, get_analyzer
-    from app.services.embeddings import HashingEmbedder, get_embedder
-    from app.services.quizzes import (
-        StubGrader,
-        StubQuizAuthor,
-        get_grader,
-        get_quiz_author,
-    )
+    from app.services.adjudication import get_adjudicator
+    from app.services.analysis import get_analyzer
+    from app.services.embeddings import get_embedder
+    from app.services.quizzes import get_grader, get_quiz_author
 
     assert isinstance(get_embedder(), HashingEmbedder)
     assert isinstance(get_analyzer(), HeuristicAnalyzer)

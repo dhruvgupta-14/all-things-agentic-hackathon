@@ -14,9 +14,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Concept, Observation, Session, Turn, User
-from app.services.embeddings import get_embedder
 from app.services.learner_state import SOURCE_WEIGHT, weight_for
 from app.services.signals import SignalRejected, SignalService
+from tests.fakes import HashingEmbedder
 
 
 async def _user(session: AsyncSession) -> User:
@@ -37,7 +37,7 @@ async def _turn(session: AsyncSession, user: User) -> Turn:
 
 
 def _service(session: AsyncSession) -> SignalService:
-    return SignalService(session, embedder=get_embedder())
+    return SignalService(session, embedder=HashingEmbedder())
 
 
 # --------------------------------------------------------------------------

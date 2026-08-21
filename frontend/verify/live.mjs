@@ -1,20 +1,74 @@
 /**
- * Temporary harness: drive one real turn through the frontend's own client and
- * stream modules, over the Vite proxy, against the running backend.
+ * Drive one real turn through the frontend's own client and stream modules,
+ * against the deployed service, signed in as a real Firebase user.
  *
  * This is the check that the contract holds end to end — event order, payload
  * shapes, the citation click-through, and the durable transcript a reload
  * rebuilds from. It costs real model quota, so it runs one turn.
+ *
+ * It used to point at the Vite dev server and rely on the backend's
+ * development auth bypass, which meant it exercised a request path and an
+ * identity that no longer exist anywhere. It now signs in the way a judge
+ * does and talks to the origin a judge would.
+ *
+ *   PAPER_COMPANION_URL   the service to drive (defaults to the deployed one)
+ *   DEMO_EMAIL            a real Firebase account in this project
+ *   DEMO_PASSWORD
+ *
+ *   node verify/live.mjs
  */
 globalThis.localStorage = { getItem: () => null, setItem: () => {} }
 
-const ORIGIN = 'http://localhost:5173'
+const ORIGIN =
+  process.env.PAPER_COMPANION_URL ??
+  'https://paper-companion-929850602194.us-central1.run.app'
+
+// The web API key is a public project identifier, not a credential — the same
+// one that ships in the browser bundle. Every request it can make is still
+// checked by the backend against a verified ID token.
+const FIREBASE_API_KEY = 'AIzaSyDBoycPkygePPPkrzT3CoKSGLy7C5nLQ20'
+
+const email = process.env.DEMO_EMAIL
+const password = process.env.DEMO_PASSWORD
+if (!email || !password) {
+  console.error(
+    'DEMO_EMAIL and DEMO_PASSWORD must be set: there is no auth bypass to fall
+' +
+      'back on, in this harness or anywhere else.',
+  )
+  process.exit(2)
+}
+
 const realFetch = globalThis.fetch
+
+// Identity Toolkit directly rather than the Firebase SDK: the SDK expects a
+// browser, and this is the one place the harness needs a token rather than a
+// session.
+const signIn = await realFetch(
+  `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, returnSecureToken: true }),
+  },
+)
+if (!signIn.ok) {
+  const detail = await signIn.text()
+  console.error(`sign-in failed (${signIn.status}): ${detail}`)
+  process.exit(1)
+}
+const { idToken } = await signIn.json()
+console.log(`signed in as ${email} against ${ORIGIN}`)
+
 globalThis.fetch = (url, init) =>
   realFetch(typeof url === 'string' && url.startsWith('/') ? ORIGIN + url : url, init)
 
-const { api } = await import('../src/api/client.js')
+const { api, setTokenProvider } = await import('../src/api/client.js')
 const { streamTurn } = await import('../src/api/stream.js')
+
+// The same seam `main.jsx` uses in the browser, so every request below carries
+// a bearer token exactly as a real one would.
+setTokenProvider(async () => idToken)
 
 let failures = 0
 const check = (name, ok, detail) => {

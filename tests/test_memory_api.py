@@ -24,14 +24,14 @@ from app.db.models import (
     UserPaperAccess,
 )
 from app.ingestion.concepts import normalize_name
-from app.services.embeddings import get_embedder
+from tests.fakes import HashingEmbedder
 
 
-async def _principal(db_session: AsyncSession, dev_auth: str) -> User:
+async def _principal(db_session: AsyncSession, signed_in: str) -> User:
     """The user the dev bypass authenticates as for this test."""
-    user = await db_session.scalar(select(User).where(User.auth_subject == dev_auth))
+    user = await db_session.scalar(select(User).where(User.auth_subject == signed_in))
     if user is None:
-        user = User(auth_subject=dev_auth)
+        user = User(auth_subject=signed_in)
         db_session.add(user)
         await db_session.flush()
     return user
@@ -51,7 +51,7 @@ async def _concept(
         user_id=user.user_id,
         canonical_name=name,
         normalized_name=normalize_name(name),
-        embedding=get_embedder().embed_query(name),
+        embedding=HashingEmbedder().embed_query(name),
         understanding_score=score,
         score_confidence=confidence,
         effective_style=style,
@@ -68,9 +68,9 @@ async def _concept(
 
 
 async def test_listing_returns_this_readers_concepts(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     await _concept(db_session, user, "ELBO", score=0.3, confidence=0.8, style="numerical")
 
     body = (await client.get("/api/memory/concepts")).json()
@@ -83,9 +83,9 @@ async def test_listing_returns_this_readers_concepts(
 
 
 async def test_listing_never_crosses_users(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    await _principal(db_session, dev_auth)
+    await _principal(db_session, signed_in)
     stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
     db_session.add(stranger)
     await db_session.flush()
@@ -101,10 +101,10 @@ async def test_listing_never_crosses_users(
 
 
 async def test_the_thresholds_travel_with_the_payload(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """So the UI cannot drift from the gate that fires callbacks."""
-    await _principal(db_session, dev_auth)
+    await _principal(db_session, signed_in)
 
     body = (await client.get("/api/memory/concepts")).json()
 
@@ -113,9 +113,9 @@ async def test_the_thresholds_travel_with_the_payload(
 
 
 async def test_only_weak_filters(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     await _concept(db_session, user, "Weak Thing", score=0.2, confidence=0.8)
     await _concept(db_session, user, "Solid Thing", score=0.95, confidence=0.9)
 
@@ -132,10 +132,10 @@ async def test_only_weak_filters(
 
 
 async def test_detail_carries_evidence_with_turn_provenance(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """The link that turns a score into something a reader can interrogate."""
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     concept = await _concept(db_session, user, "ELBO", score=0.35, confidence=0.7)
 
     conversation = Session(user_id=user.user_id)
@@ -169,9 +169,9 @@ async def test_detail_carries_evidence_with_turn_provenance(
 
 
 async def test_detail_includes_related_concepts(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     concept = await _concept(db_session, user, "ELBO")
     other = await _concept(db_session, user, "KL divergence")
     db_session.add(
@@ -193,10 +193,10 @@ async def test_detail_includes_related_concepts(
 
 
 async def test_source_papers_are_filtered_through_the_grant(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """Memory pointing at a paper is not authorization to read it."""
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     paper = Paper(
         content_hash=uuid.uuid4().hex + uuid.uuid4().hex[:32],
         storage_uri=f"file://{uuid.uuid4()}.pdf",
@@ -219,10 +219,10 @@ async def test_source_papers_are_filtered_through_the_grant(
 
 
 async def test_another_readers_concept_is_a_404_not_a_403(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """A 403 would confirm the id is real."""
-    await _principal(db_session, dev_auth)
+    await _principal(db_session, signed_in)
     stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
     db_session.add(stranger)
     await db_session.flush()
@@ -239,11 +239,11 @@ async def test_another_readers_concept_is_a_404_not_a_403(
 
 
 async def test_a_correction_overrides_inference_and_is_recorded_as_evidence(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """It outranks the score *and* joins the evidence trail — the score stays
     reproducible from `observations` either way."""
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     concept = await _concept(db_session, user, "ELBO", score=0.2, confidence=0.8)
 
     response = await client.patch(
@@ -268,9 +268,9 @@ async def test_a_correction_overrides_inference_and_is_recorded_as_evidence(
 
 
 async def test_a_correction_downward_records_the_other_signal(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     concept = await _concept(db_session, user, "ELBO", score=0.9, confidence=0.8)
 
     await client.patch(
@@ -288,9 +288,9 @@ async def test_a_correction_downward_records_the_other_signal(
 
 
 async def test_a_correction_cannot_reach_another_reader(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    await _principal(db_session, dev_auth)
+    await _principal(db_session, signed_in)
     stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
     db_session.add(stranger)
     await db_session.flush()
@@ -307,9 +307,9 @@ async def test_a_correction_cannot_reach_another_reader(
 
 
 async def test_an_out_of_range_correction_is_refused(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     concept = await _concept(db_session, user, "ELBO")
 
     response = await client.patch(
@@ -326,9 +326,9 @@ async def test_an_out_of_range_correction_is_refused(
 
 
 async def test_the_graph_returns_nodes_and_typed_edges(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     a = await _concept(db_session, user, "ELBO", score=0.2, confidence=0.8)
     b = await _concept(db_session, user, "KL divergence")
     db_session.add(
@@ -359,9 +359,9 @@ async def test_the_graph_returns_nodes_and_typed_edges(
 
 
 async def test_the_graph_is_user_scoped(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    await _principal(db_session, dev_auth)
+    await _principal(db_session, signed_in)
     stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
     db_session.add(stranger)
     await db_session.flush()
@@ -373,10 +373,10 @@ async def test_the_graph_is_user_scoped(
 
 
 async def test_an_edge_never_points_at_a_missing_node(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """Otherwise the view draws a line into nothing."""
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     await _concept(db_session, user, "ELBO")
 
     body = (await client.get("/api/memory/graph")).json()
@@ -392,13 +392,13 @@ async def test_an_edge_never_points_at_a_missing_node(
 
 
 async def test_a_turns_citations_survive_a_reload(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """The real fix for inert pills: the pills come back from the database
     rather than from a localStorage cache that another device does not have."""
     from app.db.models import Chunk, Section, TurnRetrieval
 
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     paper = Paper(
         content_hash=uuid.uuid4().hex + uuid.uuid4().hex[:32],
         storage_uri=f"file://{uuid.uuid4()}.pdf",
@@ -464,12 +464,12 @@ async def test_a_turns_citations_survive_a_reload(
 
 
 async def test_uncited_retrievals_are_not_citations(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """A citation *is* a `was_cited` row. Retrieved-and-unused is not one."""
     from app.db.models import Chunk, Section, TurnRetrieval
 
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     paper = Paper(
         content_hash=uuid.uuid4().hex + uuid.uuid4().hex[:32],
         storage_uri=f"file://{uuid.uuid4()}.pdf",
@@ -526,9 +526,9 @@ async def test_uncited_retrievals_are_not_citations(
 
 
 async def test_another_readers_turn_is_a_404(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    await _principal(db_session, dev_auth)
+    await _principal(db_session, signed_in)
     stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
     db_session.add(stranger)
     await db_session.flush()
@@ -547,7 +547,7 @@ async def test_another_readers_turn_is_a_404(
 
 
 async def test_a_concept_with_no_evidence_is_still_listed(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """The confidence floor gates what the system *claims*, not what it shows.
 
@@ -555,7 +555,7 @@ async def test_a_concept_with_no_evidence_is_still_listed(
     about the reader. Hiding those would make the graph look smaller than it
     is and give the reader nothing to correct.
     """
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     await _concept(db_session, user, "Freshly Ingested Concept")
 
     body = (await client.get("/api/memory/concepts")).json()

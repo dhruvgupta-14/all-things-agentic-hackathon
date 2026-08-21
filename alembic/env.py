@@ -1,6 +1,7 @@
+import os
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import pool
 
 from alembic import context
 from app.config import get_settings
@@ -9,9 +10,23 @@ from app.db.base import Base
 
 config = context.config
 
-# The URL lives in .env, not alembic.ini, so migrations and the app can never
-# disagree about which database they are pointed at.
-config.set_main_option("sqlalchemy.url", get_settings().sync_database_url)
+# An explicit DSN for the migration tool, and the one place in this repository
+# that will talk to a database other than Cloud SQL.
+#
+# It exists for the test database. The suite runs against a throwaway Postgres
+# and needs the same schema, and the schema is defined by these migrations —
+# `create_all` would build the tables but none of the append-only triggers, so
+# the harness would be testing a database the application never runs on.
+#
+# The application itself never reads this. It is not a second configuration
+# mode; it is an argument to `alembic`.
+ALEMBIC_URL_OVERRIDE = os.environ.get("ALEMBIC_DATABASE_URL")
+
+# Otherwise the URL comes from settings, not alembic.ini, so migrations and the
+# application can never disagree about which database they are pointed at.
+config.set_main_option(
+    "sqlalchemy.url", ALEMBIC_URL_OVERRIDE or get_settings().sync_database_url
+)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -34,26 +49,23 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    settings = get_settings()
+    from sqlalchemy import create_engine
 
-    if settings.uses_cloud_sql:
-        # The connector supplies the connection, so there is no host in the
-        # URL to dial. This is why migrations use the connector rather than
-        # Cloud Run's unix socket: `alembic upgrade head` has to run *before*
+    if ALEMBIC_URL_OVERRIDE:
+        # A plain DSN, dialled directly. The test database.
+        connectable = create_engine(ALEMBIC_URL_OVERRIDE, poolclass=pool.NullPool)
+    else:
+        # Cloud SQL through the connector, which supplies the connection — so
+        # there is no host in the URL to dial. The connector rather than Cloud
+        # Run's unix socket because `alembic upgrade head` has to run *before*
         # the revision that needs it exists, from wherever the operator is.
-        from sqlalchemy import create_engine
+        settings = get_settings()
 
         from app.db.cloud_sql import sync_creator
 
         connectable = create_engine(
             settings.sync_database_url,
             creator=sync_creator(settings),
-            poolclass=pool.NullPool,
-        )
-    else:
-        connectable = engine_from_config(
-            config.get_section(config.config_ini_section, {}),
-            prefix="sqlalchemy.",
             poolclass=pool.NullPool,
         )
 

@@ -3,11 +3,42 @@ import { useRef, useState } from 'react'
 import { IconDoc, IconMoon, IconPlus, IconSun } from './Icons'
 
 const STATUS = {
-  queued: { label: 'Queued', tone: 'text-faint', dot: 'bg-faint' },
+  queued: { label: 'Queued', tone: 'text-faint', dot: 'bg-faint animate-breathe' },
   processing: { label: 'Processing', tone: 'text-warn', dot: 'bg-warn animate-breathe' },
   ready: null,
   partially_ready: { label: 'Partial', tone: 'text-warn', dot: 'bg-warn' },
   failed: { label: 'Failed', tone: 'text-danger', dot: 'bg-danger' },
+}
+
+// What each ingestion phase is actually doing, for the reader rather than for
+// the log. Shown next to `Processing` so a paper that takes a minute looks
+// like progress instead of a hang.
+const PHASE = {
+  parse: 'reading the PDF',
+  section: 'finding sections',
+  chunk: 'splitting into passages',
+  embed: 'building the index',
+  analyze: 'extracting concepts',
+  canonicalize: 'linking to what you know',
+}
+
+function statusFor(paper) {
+  if (paper.stalled) {
+    return {
+      label: 'Not processing',
+      tone: 'text-danger',
+      dot: 'bg-danger',
+      hint:
+        'Queued for several minutes with no progress. Ingestion runs on the ' +
+        'deployed service; if it is not running, nothing will pick this up.',
+    }
+  }
+
+  const base = STATUS[paper.processing_status]
+  if (!base) return null
+
+  const phase = PHASE[paper.processing_phase]
+  return phase ? { ...base, label: `${base.label} · ${phase}` } : base
 }
 
 function paperLabel(paper) {
@@ -15,7 +46,7 @@ function paperLabel(paper) {
 }
 
 function PaperRow({ paper, active, onSelect }) {
-  const status = STATUS[paper.processing_status]
+  const status = statusFor(paper)
   const usable = paper.processing_status === 'ready' || paper.processing_status === 'partially_ready'
 
   return (
@@ -37,7 +68,9 @@ function PaperRow({ paper, active, onSelect }) {
             {status && (
               <>
                 <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
-                <span className={`text-[11px] ${status.tone}`}>{status.label}</span>
+                <span className={`text-[11px] ${status.tone}`} title={status.hint}>
+                  {status.label}
+                </span>
               </>
             )}
             {paper.needs_reindex && (
@@ -84,6 +117,7 @@ export function Rail({
   onSelectSession,
   onNewSession,
   onUpload,
+  uploading,
   theme,
   onToggleTheme,
 }) {
@@ -94,6 +128,9 @@ export function Rail({
   async function accept(files) {
     const file = files?.[0]
     if (!file) return
+    // One at a time. A second file dropped mid-upload would replace the name
+    // being shown and leave the reader unsure which one is in flight.
+    if (uploading) return
     setUploadError(null)
     try {
       await onUpload(file)
@@ -139,10 +176,11 @@ export function Rail({
             <h2 className="rail-heading">Papers</h2>
             <button
               type="button"
+              disabled={Boolean(uploading)}
               onClick={() => fileInput.current?.click()}
-              className="rounded px-1.5 py-0.5 text-[11px] text-muted transition-colors duration-100 hover:bg-raised hover:text-ink"
+              className="rounded px-1.5 py-0.5 text-[11px] text-muted transition-colors duration-100 hover:bg-raised hover:text-ink disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
             >
-              Add
+              {uploading ? 'Adding…' : 'Add'}
             </button>
           </div>
 
@@ -158,6 +196,23 @@ export function Rail({
           />
 
           <div className="space-y-0.5">
+            {/* The upload itself, before the paper exists to be listed. The
+                request reads, sniffs, page-counts, hashes and stores the file
+                before returning, which is seconds of apparent nothing. */}
+            {uploading && (
+              <div className="flex items-start gap-2 rounded px-2.5 py-2">
+                <IconDoc className="mt-[2px] h-3.5 w-3.5 shrink-0 opacity-40" />
+                <span className="min-w-0 flex-1">
+                  <span className="line-clamp-2 break-words text-muted">
+                    {uploading}
+                  </span>
+                  <span className="mt-1 flex items-center gap-1.5">
+                    <span className="h-1.5 w-1.5 animate-breathe rounded-full bg-accent" />
+                    <span className="text-[11px] text-muted">Uploading…</span>
+                  </span>
+                </span>
+              </div>
+            )}
             {papers.map((paper) => (
               <PaperRow
                 key={paper.paper_id}
@@ -166,7 +221,7 @@ export function Rail({
                 onSelect={onSelectPaper}
               />
             ))}
-            {!papers.length && (
+            {!papers.length && !uploading && (
               <p className="px-2.5 py-2 text-[12px] leading-relaxed text-faint">
                 Drop a PDF anywhere in this panel to add it.
               </p>

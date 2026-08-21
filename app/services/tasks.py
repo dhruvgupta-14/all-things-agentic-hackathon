@@ -1,24 +1,21 @@
-"""The asynchronous-work seam.
+"""The asynchronous-work seam: Cloud Tasks, and nothing else.
 
-Ingestion takes 30-60 seconds, so it cannot happen on the request path. Where
-it happens instead depends on how this process is deployed:
+Ingestion takes 30-60 seconds, so it cannot happen on the request path. The
+upload enqueues an HTTPS push back to `/internal/ingest` on this same service,
+signed with an OIDC token; the queue owns the retry budget, so a job survives
+an instance being reclaimed, a deploy, or a crash.
 
-  * **Cloud Tasks** (ARCHITECTURE 8, and the deployment design): the upload
-    enqueues an HTTPS push back to `/internal/ingest` on this same service,
-    signed with an OIDC token. The queue owns the retry budget, so a job
-    survives an instance being reclaimed, a deploy, or a crash.
-  * **In-process** via FastAPI `BackgroundTasks`: correct for local
-    development, where there is no queue and the server outlives the request.
+There used to be a second path — FastAPI `BackgroundTasks`, for local runs
+with no queue. It is gone. On Cloud Run that path is **data loss**: the
+instance is reclaimed once the response is sent and takes the unfinished job
+with it, leaving the paper `queued` forever with nothing to notice. Keeping it
+"only for local" meant the ingestion most people exercised day to day was not
+the ingestion that would run in production, and the difference was invisible
+until it mattered.
 
-On Cloud Run the in-process path is **data loss** — the instance is reclaimed
-once the response is sent and takes the unfinished job with it, leaving the
-paper `queued` forever with nothing to notice it. `dispatch` therefore refuses
-that path outright unless `APP_ENV=local`, rather than silently taking it.
-
-The job bodies below are shared by both callers. They return an outcome instead
-of raising, because the two callers need opposite things from a failure: the
-background path has nobody to tell, and the HTTP path must translate it into
-the status code that decides whether Cloud Tasks retries (ARCHITECTURE 8.2).
+The job bodies return an outcome rather than raising: the HTTP caller has to
+translate a failure into the status code that decides whether Cloud Tasks
+retries (ARCHITECTURE 8.2), which an exception would not carry.
 """
 
 from __future__ import annotations
@@ -177,14 +174,8 @@ def _create_task(settings: Settings, payload: dict) -> str:
     return client.create_task(parent=parent, task=task).name
 
 
-async def dispatch(
-    job: Job,
-    paper_id: uuid.UUID,
-    user_id: uuid.UUID | None,
-    *,
-    background_tasks,
-) -> str:
-    """Schedule `job`, and say which way it went.
+async def dispatch(job: Job, paper_id: uuid.UUID, user_id: uuid.UUID | None) -> str:
+    """Enqueue `job`, and return the task name the queue assigned it.
 
     Raises:
         TaskDispatchError: it was not scheduled at all. Never returns normally
@@ -192,36 +183,19 @@ async def dispatch(
             watching a paper that is never going to move.
     """
     settings = get_settings()
+    payload = {
+        "job": job,
+        "paper_id": str(paper_id),
+        "user_id": str(user_id) if user_id else None,
+    }
 
-    if settings.uses_cloud_tasks:
-        payload = {
-            "job": job,
-            "paper_id": str(paper_id),
-            "user_id": str(user_id) if user_id else None,
-        }
-        try:
-            # In a thread: the Cloud Tasks client is synchronous, and this runs
-            # inside a request that is holding the upload open.
-            name = await run_in_threadpool(_create_task, settings, payload)
-        except Exception as exc:
-            logger.exception(
-                "could not enqueue %s", job, extra={"paper_id": str(paper_id)}
-            )
-            raise TaskDispatchError(str(exc)) from exc
+    try:
+        # In a thread: the Cloud Tasks client is synchronous, and this runs
+        # inside a request that is holding the upload open.
+        name = await run_in_threadpool(_create_task, settings, payload)
+    except Exception as exc:
+        logger.exception("could not enqueue %s", job, extra={"paper_id": str(paper_id)})
+        raise TaskDispatchError(str(exc)) from exc
 
-        logger.info("enqueued %s", job, extra={"paper_id": str(paper_id), "task": name})
-        return "cloud-tasks"
-
-    if settings.app_env != "local":
-        # The failure this guard exists for is not visible at startup: the
-        # service boots, uploads are accepted, and papers simply never leave
-        # `queued`. Refuse instead.
-        raise TaskDispatchError(
-            f"APP_ENV is {settings.app_env!r} and Cloud Tasks is not configured. "
-            "In-process background work does not survive Cloud Run reclaiming "
-            "the instance. Set CLOUD_TASKS_QUEUE, SERVICE_ACCOUNT_EMAIL and "
-            "SERVICE_BASE_URL."
-        )
-
-    background_tasks.add_task(JOBS[job], paper_id, user_id)
-    return "in-process"
+    logger.info("enqueued %s", job, extra={"paper_id": str(paper_id), "task": name})
+    return name

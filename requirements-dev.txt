@@ -4,3 +4,8 @@ pytest-cov          # test coverage reporting
 ruff                # linter
 mypy                # type checker
 reportlab          # builds real PDFs for ingestion tests
+
+psycopg[binary]              # Postgres driver, sync. Test-only: `alembic upgrade
+                             # head` against the throwaway Postgres the suite runs
+                             # on, via ALEMBIC_DATABASE_URL. The application never
+                             # speaks to anything but Cloud SQL.

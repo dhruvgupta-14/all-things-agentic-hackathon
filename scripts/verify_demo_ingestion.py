@@ -43,10 +43,14 @@ from app.db.models import (
     UserPaperAccess,
 )
 from app.ingestion.pipeline import canonicalize_existing_paper, ingest_paper
-from app.services.storage import get_storage
+from app.services import storage
+from scripts.demo_identity import resolve_uid
 
 DEMO_DIR = pathlib.Path("demo_papers")
-DEMO_SUBJECT = "local-dev-user"
+# The demo reader is a real Firebase account now; there is no bypass
+# identity to fall back on. Resolved rather than pasted, so the four
+# scripts cannot drift onto different readers.
+DEMO_SUBJECT = resolve_uid()
 
 # Paper A must be ingested first: the cross-paper edge is written when the
 # *second* paper's concepts are canonicalized against the first paper's.
@@ -101,7 +105,7 @@ async def ingest(rebuild_concepts_only: bool = False) -> None:
         print("set GEMINI_API_KEY (or VERTEX_PROJECT) and re-run")
         raise SystemExit(2)
 
-    storage = get_storage()
+    backend = storage.get_storage()
 
     async with async_session_factory() as session:
         user = await _demo_user(session)
@@ -132,7 +136,7 @@ async def ingest(rebuild_concepts_only: bool = False) -> None:
             if paper is None:
                 paper = Paper(
                     content_hash=digest,
-                    storage_uri=storage.put(data, content_hash=digest),
+                    storage_uri=backend.put(data, content_hash=digest),
                     original_filename=path.name,
                     processing_status="queued",
                 )

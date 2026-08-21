@@ -58,8 +58,8 @@ def authorized():
 # --------------------------------------------------------------------------
 
 
-async def test_an_unauthenticated_push_is_refused(client: AsyncClient, dev_auth):
-    """`dev_auth` is active, which is the point: the local bypass authenticates
+async def test_an_unauthenticated_push_is_refused(client: AsyncClient, signed_in):
+    """`signed_in` is active, which is the point: the local bypass authenticates
     the *browser* API. It must not open this route, or every local run would be
     exercising a version of the endpoint that does not exist in production."""
     response = await client.post(PATH, json=body())
@@ -68,7 +68,7 @@ async def test_an_unauthenticated_push_is_refused(client: AsyncClient, dev_auth)
 
 
 async def test_a_firebase_user_token_does_not_open_the_internal_route(
-    client: AsyncClient, dev_auth, settings_env
+    client: AsyncClient, signed_in, settings_env
 ):
     """A signed-in user presenting their own perfectly valid ID token is still
     not Cloud Tasks."""
@@ -125,16 +125,31 @@ def test_an_unverified_email_claim_is_refused(settings_env):
             verify_push_token("token", get_settings())
 
 
-def test_an_unconfigured_deployment_says_so_rather_than_accepting_anything(
-    settings_env,
-):
-    """Missing configuration must not degrade into "no audience to check"."""
-    from app.config import get_settings
+def test_missing_configuration_never_degrades_into_no_check():
+    """Missing configuration must not become "no audience to verify against".
 
-    settings_env(SERVICE_BASE_URL=None, SERVICE_ACCOUNT_EMAIL=None)
+    Settings makes this unreachable in a running process — both fields are
+    required, and an http SERVICE_BASE_URL is refused at startup. The guard
+    stays because this function takes its settings as an argument, and the one
+    thing it must never do is treat absent configuration as permission.
+    """
+    from types import SimpleNamespace
+
+    unconfigured = SimpleNamespace(service_base_url=None, service_account_email=None)
 
     with pytest.raises(OidcConfigurationError):
-        verify_push_token("token", get_settings())
+        verify_push_token("token", unconfigured)
+
+
+def test_a_non_https_service_url_is_refused_at_startup():
+    """It is the OIDC audience. An http value would fail verification on every
+    push, which surfaces as papers that never leave `queued`."""
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    with pytest.raises(ValidationError, match="https"):
+        Settings(SERVICE_BASE_URL="http://not-secure.example")
 
 
 # --------------------------------------------------------------------------

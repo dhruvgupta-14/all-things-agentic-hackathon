@@ -23,10 +23,10 @@ from app.services.feedback import (
 )
 
 
-async def _principal(db_session: AsyncSession, dev_auth: str) -> User:
-    user = await db_session.scalar(select(User).where(User.auth_subject == dev_auth))
+async def _principal(db_session: AsyncSession, signed_in: str) -> User:
+    user = await db_session.scalar(select(User).where(User.auth_subject == signed_in))
     if user is None:
-        user = User(auth_subject=dev_auth)
+        user = User(auth_subject=signed_in)
         db_session.add(user)
         await db_session.flush()
     return user
@@ -290,9 +290,9 @@ def test_a_preferred_style_reaches_the_agent():
 
 
 async def test_posting_feedback_reports_whether_it_changed_anything(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     turn = await _turn(db_session, user)
 
     changed = await client.post(
@@ -311,9 +311,9 @@ async def test_posting_feedback_reports_whether_it_changed_anything(
 
 
 async def test_feedback_cannot_name_another_readers_turn(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    await _principal(db_session, dev_auth)
+    await _principal(db_session, signed_in)
     stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
     db_session.add(stranger)
     await db_session.flush()
@@ -328,9 +328,9 @@ async def test_feedback_cannot_name_another_readers_turn(
 
 
 async def test_the_debug_strip_reports_what_the_last_turn_did(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    user = await _principal(db_session, dev_auth)
+    user = await _principal(db_session, signed_in)
     conversation = Session(user_id=user.user_id)
     db_session.add(conversation)
     await db_session.flush()
@@ -360,9 +360,9 @@ async def test_the_debug_strip_reports_what_the_last_turn_did(
 
 
 async def test_the_debug_strip_is_session_scoped(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
-    await _principal(db_session, dev_auth)
+    await _principal(db_session, signed_in)
     stranger = User(auth_subject=f"stranger-{uuid.uuid4()}")
     db_session.add(stranger)
     await db_session.flush()

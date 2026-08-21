@@ -127,19 +127,15 @@ class AgentOutcome:
 
 
 def _configure_transport() -> None:
-    """Point the ADK/GenAI client at whichever backend is configured.
+    """Point the ADK/GenAI client at Vertex.
 
     ADK reads these from the environment rather than from a client we pass, so
-    this is the one place the transport choice is applied.
+    this is the one place the transport is applied.
     """
     settings = get_settings()
-    if settings.vertex_project:
-        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
-        os.environ["GOOGLE_CLOUD_PROJECT"] = settings.vertex_project
-        os.environ["GOOGLE_CLOUD_LOCATION"] = settings.vertex_location
-    elif settings.gemini_api_key:
-        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "0"
-        os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
+    os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
+    os.environ["GOOGLE_CLOUD_PROJECT"] = settings.vertex_project
+    os.environ["GOOGLE_CLOUD_LOCATION"] = settings.vertex_location
 
 
 def build_agent(

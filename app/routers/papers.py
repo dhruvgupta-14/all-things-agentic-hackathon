@@ -2,15 +2,7 @@ import hashlib
 import logging
 import uuid
 
-from fastapi import (
-    APIRouter,
-    BackgroundTasks,
-    Depends,
-    File,
-    HTTPException,
-    UploadFile,
-    status,
-)
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,8 +11,7 @@ from app.config import get_settings
 from app.db.base import get_db
 from app.db.models import Paper, UserPaperAccess
 from app.ingestion.parser import PdfCorruptError, PdfEncryptedError, probe_page_count
-from app.services.embeddings import get_embedder
-from app.services.storage import get_storage
+from app.services import embeddings, storage
 from app.services.tasks import TaskDispatchError, dispatch
 
 logger = logging.getLogger(__name__)
@@ -35,7 +26,7 @@ def _serialize(paper: Paper, *, nickname=None, last_opened_at=None) -> dict:
     # A paper embedded with a different model is readable but not searchable:
     # its vectors live in another space. Surface that rather than letting it
     # look healthy while silently returning no evidence.
-    active_model = get_embedder().model_name
+    active_model = embeddings.get_embedder().model_name
     return {
         "paper_id": str(paper.paper_id),
         "title": paper.title,
@@ -46,6 +37,11 @@ def _serialize(paper: Paper, *, nickname=None, last_opened_at=None) -> dict:
         "page_count": paper.page_count,
         "unreadable_pages": paper.unreadable_pages,
         "embedding_model": paper.embedding_model,
+        # So the client can say how long a paper has been waiting. Ingestion is
+        # pushed to a queue that cannot report back that it gave up, so a paper
+        # can sit at `queued` indefinitely with no error anywhere — and an
+        # indicator that spins forever tells the reader nothing.
+        "created_at": paper.created_at.isoformat() if paper.created_at else None,
         "needs_reindex": (
             paper.processing_status in ("ready", "partially_ready")
             and paper.embedding_model != active_model
@@ -128,7 +124,6 @@ async def get_paper(
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def upload_paper(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     principal: Principal = Depends(get_current_user),
     session: AsyncSession = Depends(get_db),
@@ -177,12 +172,7 @@ async def upload_paper(
         await _grant_access(session, principal.user_id, existing.paper_id, file.filename)
         await session.commit()
         try:
-            await dispatch(
-                "canonicalize",
-                existing.paper_id,
-                principal.user_id,
-                background_tasks=background_tasks,
-            )
+            await dispatch("canonicalize", existing.paper_id, principal.user_id)
         except TaskDispatchError:
             # Not fatal, unlike the ingest branch below: the paper is already
             # parsed and fully searchable, and what is lost is the reader's
@@ -194,8 +184,8 @@ async def upload_paper(
             )
         return _serialize(existing)
 
-    storage = get_storage()
-    storage_uri = storage.put(data, content_hash=content_hash)
+    backend = storage.get_storage()
+    storage_uri = backend.put(data, content_hash=content_hash)
 
     paper = Paper(
         content_hash=content_hash,
@@ -211,9 +201,7 @@ async def upload_paper(
     await session.commit()
 
     try:
-        await dispatch(
-            "ingest", paper.paper_id, principal.user_id, background_tasks=background_tasks
-        )
+        await dispatch("ingest", paper.paper_id, principal.user_id)
     except TaskDispatchError:
         # The paper row is already committed, so doing nothing here would leave
         # it `queued` forever — the exact silent stall this dispatch path was

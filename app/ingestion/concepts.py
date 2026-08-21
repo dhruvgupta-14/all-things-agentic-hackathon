@@ -27,7 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.db.models import Concept, ConceptRelationship
-from app.services.adjudication import Adjudicator, ConceptPair, get_adjudicator
+from app.services import adjudication
+from app.services.adjudication import Adjudicator, ConceptPair
 from app.services.analysis import ConceptCandidate
 from app.services.embeddings import Embedder
 
@@ -82,7 +83,7 @@ class ConceptService:
     ) -> None:
         self._session = session
         self._embedder = embedder
-        self._adjudicator = adjudicator or get_adjudicator()
+        self._adjudicator = adjudicator or adjudication.get_adjudicator()
 
     # -- recall ------------------------------------------------------------
 

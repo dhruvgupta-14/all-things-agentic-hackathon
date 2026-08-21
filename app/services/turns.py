@@ -76,6 +76,70 @@ logger = logging.getLogger(__name__)
 # cosmetic — the text is already final and verified.
 STREAM_CHUNK_CHARS = 24
 
+# ARCHITECTURE 8.4: only these two statuses may be answered from.
+ANSWERABLE_STATUSES = ("ready", "partially_ready")
+
+# What a `failed` paper's typed error code means, in words a reader can act on.
+# The codes come from the ingestion pipeline; anything unlisted falls back to
+# the generic line rather than leaking an identifier into the conversation.
+INGESTION_FAILURE_REASONS = {
+    "pdf_encrypted": (
+        "it is password protected, so its text could not be read. "
+        "Upload an unprotected copy and I can work from that."
+    ),
+    "pdf_corrupt": (
+        "the file could not be opened as a PDF. It may have been truncated "
+        "in transit — try uploading it again."
+    ),
+    "pdf_not_extractable": (
+        "it appears to be a scan with no text layer. I can only read PDFs "
+        "whose text is selectable; a version run through OCR would work."
+    ),
+    "original_missing": (
+        "the stored file could not be found, so it could not be processed. "
+        "Uploading it again should fix that."
+    ),
+    "no_chunks": "no readable text could be extracted from it.",
+    "enqueue_failed": (
+        "processing could not be scheduled. Uploading it again should fix that."
+    ),
+}
+
+
+def _unready_paper_response(paper: Paper) -> str:
+    """What to say when the paper cannot be answered from yet.
+
+    Composed here rather than left to the agent, and returned *instead of*
+    running it. An agent asked a question about an unprocessed paper searches,
+    finds nothing, and reports that the paper contains nothing on the subject —
+    which is a false statement about the paper's contents dressed as a finding,
+    and reads as "your paper is irrelevant" rather than "your paper is not
+    ready". It also spends a model call and several tool calls to arrive there.
+    """
+    title = paper.title or paper.original_filename or "This paper"
+
+    if paper.processing_status == "failed":
+        reason = INGESTION_FAILURE_REASONS.get(
+            paper.error_code or "", "it could not be processed."
+        )
+        return (
+            f"I cannot answer from **{title}** because {reason}\n\n"
+            "Nothing I say about it now would be grounded in the paper itself, "
+            "so I would rather tell you that than guess."
+        )
+
+    phase = f" (currently: {paper.processing_phase})" if paper.processing_phase else ""
+    return (
+        f"**{title}** is still being processed{phase}, so I cannot search it yet.\n\n"
+        "Every answer I give about a paper has to point at a passage that was "
+        "actually retrieved from it, and there is nothing to retrieve until "
+        "ingestion finishes. The status in the sidebar updates on its own — ask "
+        "me again once it reads *Ready*.\n\n"
+        "In the meantime I can still answer general questions, or work from "
+        "another paper you have open."
+    )
+
+
 
 def _memory_summary(records: list[MemoryRecord]) -> str | None:
     """Prefetched memory, as compact lines for the instruction.
@@ -230,6 +294,18 @@ class TurnPipeline:
 
             with timings.span("scope"):
                 scope, paper = await self._scope_for(conversation, user_id)
+
+            # Step 4 — deterministic route, for the same reason as the quiz
+            # branch above. A paper that is not `ready` has no chunks to
+            # retrieve, and running the agent against it produces a confident
+            # statement about what the paper does not contain. Answer from the
+            # status instead (ARCHITECTURE 8.4).
+            if paper is not None and paper.processing_status not in ANSWERABLE_STATUSES:
+                async for frame in self._refuse_unready_paper(
+                    conversation, user_id, user_message, paper, started
+                ):
+                    yield frame
+                return
 
             context = TurnToolContext(
                 session=self._session,
@@ -394,6 +470,74 @@ class TurnPipeline:
                 code="internal_error", message="The turn could not be completed."
             ).encode()
             raise exc from None
+
+    async def _refuse_unready_paper(
+        self,
+        conversation: Session,
+        user_id: uuid.UUID,
+        user_message: str,
+        paper: Paper,
+        started: float,
+    ) -> AsyncIterator[str]:
+        """Answer from the paper's status, without retrieval or the agent.
+
+        The turn is still recorded. It happened, the reader asked something,
+        and the transcript a reload rebuilds has to match what was on screen —
+        a turn that streams but is never persisted disappears on refresh.
+        `grounding_status` is `n/a` because no claim about the paper was made.
+        """
+        yield StateEvent(phase="composing", activity=conversation.activity).encode()
+
+        text = _unready_paper_response(paper)
+        latency_ms = int((time.perf_counter() - started) * 1000)
+
+        turn = Turn(
+            session_id=conversation.session_id,
+            user_id=user_id,
+            paper_id=conversation.active_paper_id,
+            ordinal=await self._next_ordinal(conversation.session_id),
+            agent_action=f"paper_{paper.processing_status}",
+            memory_read=False,
+            grounding_status="n/a",
+            tools_called=[],
+            latency_ms=latency_ms,
+        )
+        self._session.add(turn)
+        await self._session.flush()
+
+        await self._messages.append_exchange(
+            session_id=conversation.session_id,
+            user_id=user_id,
+            user_content=user_message,
+            assistant_content=text,
+            turn_id=turn.turn_id,
+        )
+        conversation.turn_count = turn.ordinal + 1
+        conversation.last_activity_at = func.now()
+        await self._session.commit()
+
+        logger.info(
+            "refused a turn against an unready paper",
+            extra={
+                "paper_id": str(paper.paper_id),
+                "processing_status": paper.processing_status,
+            },
+        )
+
+        for index in range(0, len(text), STREAM_CHUNK_CHARS):
+            yield TokenEvent(text=text[index : index + STREAM_CHUNK_CHARS]).encode()
+
+        # No citations and no memory: nothing was retrieved and nothing was
+        # learned about the reader. The empty events keep the client rendering
+        # one shape rather than two.
+        yield CitationsEvent(citations=[]).encode()
+        yield MemoryUsedEvent(memory=[]).encode()
+        yield StateEvent(phase="persisted", activity=conversation.activity).encode()
+        yield DoneEvent(
+            turn_id=str(turn.turn_id),
+            grounding_status="n/a",
+            latency_ms=latency_ms,
+        ).encode()
 
     async def _grade_pending_quiz(
         self,

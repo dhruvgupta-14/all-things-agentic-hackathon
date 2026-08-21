@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.*
+!.env.example
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
@@ -15,11 +17,12 @@ htmlcov/
 .idea/
 *.swp
 
-# local db data volume
+# The Postgres volume for the test database. The application talks only to
+# Cloud SQL; this exists so the suite has a throwaway database to roll back.
 .pgdata/
 
-# uploaded PDFs — runtime artifacts, and third-party documents
-# that should not be redistributed through this repo
+# Left over from the filesystem storage backend, which no longer exists —
+# uploaded PDFs go to Cloud Storage. Nothing writes here any more; the
+# directory is kept out of git because it holds third-party papers that should
+# not be redistributed through this repo. Safe to delete.
 .storage/
-
-

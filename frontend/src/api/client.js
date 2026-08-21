@@ -1,11 +1,13 @@
 /**
  * The HTTP surface, one function per endpoint.
  *
- * Requests go to a relative path: Vite proxies `/api` to the backend, so the
- * browser stays same-origin and the server needs no CORS middleware.
+ * Requests go to a relative path. FastAPI serves this bundle from the same
+ * origin as the API — in the container and on localhost alike — so the browser
+ * never leaves that origin, the server needs no CORS middleware, and the SSE
+ * stream is first-party. See app/spa.py.
  *
  * `user_id` is never sent. The server derives identity from the bearer token
- * (or, locally, from the dev bypass) and scopes every query itself.
+ * and scopes every query itself.
  */
 
 export class ApiError extends Error {
@@ -24,8 +26,8 @@ export class ApiError extends Error {
  * pulling the Firebase SDK in here would make the transport untestable without
  * a browser. `main.jsx` supplies the real provider at startup.
  *
- * The default returns nothing, which is exactly right for local development —
- * the backend's dev bypass authenticates requests that carry no header.
+ * The default returns nothing, which produces a request with no bearer
+ * header — and a 401. There is no unauthenticated path to fall back on.
  */
 let tokenProvider = async () => null
 

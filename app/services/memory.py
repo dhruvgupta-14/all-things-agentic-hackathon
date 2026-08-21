@@ -34,7 +34,8 @@ from sqlalchemy import Float, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Concept, ConceptRelationship, Observation, Paper, UserPaperAccess
-from app.services.embeddings import Embedder, get_embedder
+from app.services import embeddings
+from app.services.embeddings import Embedder
 from app.services.learner_state import (
     decay_factor,
     is_callback_candidate,
@@ -121,7 +122,7 @@ class MemoryService:
         self, session: AsyncSession, *, embedder: Embedder | None = None
     ) -> None:
         self._session = session
-        self._embedder = embedder or get_embedder()
+        self._embedder = embedder or embeddings.get_embedder()
         self.last_embed_ms: float = 0.0
 
     # -- record construction ------------------------------------------------

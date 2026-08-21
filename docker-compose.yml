@@ -1,16 +1,30 @@
+# The test database, and nothing else.
+#
+# The application talks only to Cloud SQL — there is no local-Postgres code
+# path left in it. This container exists so `pytest` has a throwaway database
+# with pgvector to open a transaction against and roll back.
+#
+#   docker compose up -d db
+#   ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app_local_dev_password@localhost:5432/paper_companion \
+#     alembic upgrade head
+#   pytest
+#
+# The credentials are literals rather than ${DB_USER}/${DB_PASSWORD} from
+# `.env`, deliberately: those are the real Cloud SQL credentials now, and
+# handing them to a throwaway container would be both wrong and confusing.
 services:
   db:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
-    # Matches the per-connection setting the app applies, so psql sessions and
-    # the retrieval benchmark see the same plans the application does. On
-    # Cloud SQL set the `random_page_cost` database flag to the same value.
+    # Matches the per-connection setting the application applies, so psql
+    # sessions and the retrieval benchmark see the same plans the suite does.
+    # The Cloud SQL instance carries the same value as a database flag.
     command: >
       postgres -c random_page_cost=1.1
     environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app_local_dev_password
+      POSTGRES_DB: paper_companion
     ports:
       - "5432:5432"
     volumes:

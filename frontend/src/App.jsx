@@ -23,52 +23,33 @@ export default function App() {
   const { theme, toggle } = useTheme()
   const { user, ready, error: authError, signIn, signOut } = useAuth()
 
-  // Whether this backend wants a token at all. Local development runs with the
-  // dev bypass, where `/api/me` succeeds with no Authorization header — so the
-  // app asks rather than assuming, and the same build works in both places.
-  const [authMode, setAuthMode] = useState('checking')
-
+  // Signing in is the only way in, everywhere. This used to probe `/api/me`
+  // first, because the backend had a development mode in which an unauthenticated
+  // request still resolved to a user — so the app could not know in advance
+  // whether a token was wanted. That mode is gone: no token means 401, whether
+  // the page is served from Cloud Run or from localhost.
   useEffect(() => {
-    if (!ready) return
-    let cancelled = false
+    if (user) api.me().catch(() => {})
+  }, [user])
 
-    // Signed in already: nothing to probe.
-    if (user) {
-      api.me().catch(() => {})
-      setAuthMode('signed-in')
-      return undefined
-    }
-
-    api
-      .me()
-      .then(() => {
-        // No token, and the server still knows who we are.
-        if (!cancelled) setAuthMode('bypass')
-      })
-      .catch(() => {
-        if (!cancelled) setAuthMode('required')
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [ready, user])
-
-  if (!ready || authMode === 'checking') return <AuthLoading />
-  if (authMode === 'required') return <SignIn onSignIn={signIn} error={authError} />
+  // `ready` is not the same as "signed out". Firebase resolves a persisted
+  // session asynchronously, and rendering the login screen during that gap
+  // would flash it at every returning reader.
+  if (!ready) return <AuthLoading />
+  if (!user) return <SignIn onSignIn={signIn} error={authError} />
 
   return (
     <Workspace
       theme={theme}
       onToggleTheme={toggle}
       user={user}
-      onSignOut={authMode === 'signed-in' ? signOut : null}
+      onSignOut={signOut}
     />
   )
 }
 
 export function Workspace({ theme, onToggleTheme, user, onSignOut }) {
-  const { papers, upload } = usePapers()
+  const { papers, upload, uploading } = usePapers()
   const { sessions, refresh: refreshSessions, create } = useSessions()
 
   const [sessionId, setSessionId] = useState(null)
@@ -131,6 +112,7 @@ export function Workspace({ theme, onToggleTheme, user, onSignOut }) {
         onSelectSession={(s) => setSessionId(s.session_id)}
         onNewSession={startBlankSession}
         onUpload={upload}
+        uploading={uploading}
         theme={theme}
         onToggleTheme={onToggleTheme}
       />

@@ -1,24 +1,59 @@
 # Research Paper Reading Companion
 
-FastAPI + Google ADK agent over PostgreSQL/pgvector. See the architecture
-document for the design; this file covers local setup only.
+FastAPI + Google ADK agent over Cloud SQL/pgvector. See the architecture
+document for the design; this file covers running and operating it.
 
-## Local setup
+## There is no local mode
+
+The application runs one way. Firebase Authentication, Cloud SQL, Cloud
+Storage, Cloud Tasks and Vertex AI are all required, and a missing setting is a
+startup failure rather than a fallback to something local.
+
+That is deliberate. Each of those used to have a development substitute — an
+auth bypass, a filesystem directory, in-process background work, a hashing
+embedder — and every one of them made a broken configuration look healthy. The
+service started, ingested papers, answered questions and returned citations,
+with nothing real behind any of it.
+
+Running on `localhost` is still normal and supported. It is an **address, not a
+mode**: the same settings, the same Firebase login, the same database.
+
+## Setup
 
 ```bash
 python -m venv venv
 ./venv/Scripts/python.exe -m pip install -r requirements.txt -r requirements-dev.txt
 
-cp .env.example .env        # then fill in the values
+gcloud auth application-default login   # Firebase Admin, Vertex, Cloud SQL, GCS, Tasks
+cp .env.example .env                    # then fill in the values
 
-docker compose up -d db     # Postgres 16 + pgvector on :5432
-./venv/Scripts/python.exe -m alembic upgrade head
+cd frontend && npm install && npm run build && cd ..
 ./venv/Scripts/python.exe -m uvicorn app.main:app --reload
 ```
 
+Then open <http://127.0.0.1:8000> and sign in. The SPA is served by FastAPI
+from the same origin as the API, so there is one process and one port — the
+same arrangement the container uses. There is no `npm run dev` proxy; rebuild
+the bundle to see frontend changes.
+
+Two consequences worth knowing before they surprise you:
+
+* **Uploads from a local run are ingested by the deployed service.** Cloud
+  Tasks pushes to `SERVICE_BASE_URL`, and a queue cannot reach your laptop.
+* **Everything is real.** Local runs write to the real Cloud SQL instance and
+  the real bucket, and bill real Vertex calls.
+
+## Schema
+
+```bash
+./venv/Scripts/python.exe -m alembic upgrade head
+```
+
 `alembic upgrade head` is the only supported way to create or change the
-schema. It creates the `vector` extension, all 14 tables, and the append-only
-triggers on `turns`, `observations`, and `quiz_attempts`.
+schema. It creates the `vector` extension, all 16 tables, and the append-only
+triggers on `turns`, `observations`, and `quiz_attempts`. Cloud Run does not
+run migrations — this is a deliberate step before deploying a revision that
+needs them.
 
 ## Database changes
 
@@ -35,17 +70,18 @@ trigger or extension changes, and those must be hand-written with `op.execute`.
 
 ## Embeddings and retrieval
 
-With `VERTEX_PROJECT` unset, the system uses a deterministic **hashing
-embedder** so ingestion and retrieval work offline. It is a hashing-trick
-embedding, not random noise: texts sharing vocabulary genuinely score closer,
-which makes retrieval testable locally. It is *lexical only* — it cannot match
-"car" to "automobile" — so `RETRIEVAL_MIN_SIMILARITY` will need retuning once
-`gemini-embedding-001` is in play. The model used is recorded on
+`gemini-embedding-001` on Vertex AI, always. There is no stub to fall back to:
+an unconfigured process fails rather than embedding with a hashing trick and
+producing a corpus that can never be searched with real vectors.
+
+`RETRIEVAL_MIN_SIMILARITY` stays **unset**. Cosine scores are not comparable
+between embedding models, so the embedder carries the floor for its own vector
+space (0.58 for `gemini-embedding-001`). The model is recorded on
 `papers.embedding_model`, so a switch is detectable rather than silently
 corrupting a mixed-vector index.
 
-Set `VERTEX_PROJECT` to switch to real embeddings. Existing papers keep their
-old vectors and must be re-ingested.
+The test suite substitutes a deterministic fake from `tests/fakes.py`, which is
+where the old hashing embedder now lives.
 
 ## Changing the embedding model
 
@@ -105,23 +141,38 @@ what it created.
 
 ## Checks
 
+The suite needs a throwaway Postgres. This is the **only** thing in the
+repository that talks to a database other than Cloud SQL, and the application
+has no code path that would reach it:
+
+```bash
+docker compose up -d db     # Postgres 16 + pgvector on :5432
+ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app_local_dev_password@localhost:5432/paper_companion   ./venv/Scripts/python.exe -m alembic upgrade head
+```
+
 ```bash
 ./venv/Scripts/python.exe -m ruff check app scripts tests
-./venv/Scripts/python.exe -m alembic check     # no model/schema drift
+./venv/Scripts/python.exe -m alembic check     # no model/schema drift (against Cloud SQL)
 ./venv/Scripts/python.exe -m pytest
 ```
 
-`pytest` runs **offline**. It never calls Gemini, never reads `demo_papers/`,
-and never assumes an empty database — every PDF it needs is generated in
-`tests/conftest.py`, and the model backends fall back to deterministic stubs.
+`pytest` runs **offline**. It never calls Gemini or Cloud Tasks, never reads
+`demo_papers/`, and never assumes an empty database. Every PDF it needs is
+generated in `tests/conftest.py`, and the fakes in `tests/fakes.py` are
+substituted at the module-level factories — which is why application code calls
+`embeddings.get_embedder()` rather than importing the name.
+
+`tests/conftest.py` also sets every required setting to an obviously fake value
+*before* importing the app, and environment variables outrank `.env`. So a test
+that escapes its fakes fails trying to reach `test-project` rather than quietly
+billing the real one.
 
 Test isolation is enforced structurally rather than by review. Each test
 transaction is seeded with rows it does not own (`_seed_decoy_data`), so a test
 that queries global state — `count(*) FROM papers`, "the only concept" — fails
 immediately instead of passing on an empty database and breaking the first time
 someone ingests a real paper. `tests/test_isolation.py` verifies that guard is
-in force, and each test gets a unique auth subject rather than sharing
-`local-dev-user` with a human developer.
+in force, and each test gets a unique auth subject rather than sharing one.
 
 ## Conversation history
 
@@ -172,27 +223,38 @@ it — the concepts now exist, so exact-match short-circuits adjudication.
 
 ## Authentication
 
-Requests to anything but `/health` need a Firebase ID token as
-`Authorization: Bearer <token>`. Set `FIREBASE_PROJECT_ID` in `.env`, or those
-routes return 503. Credentials come from Application Default Credentials — set
-`GOOGLE_APPLICATION_CREDENTIALS` locally; Cloud Run uses the metadata server.
+Every request to anything but `/health` and `/internal/ingest` needs a Firebase
+ID token as `Authorization: Bearer <token>`. There is one path and no bypass —
+signing in is how you use the application, on Cloud Run and on localhost alike.
+A user row is provisioned on first login, keyed on the Firebase subject.
 
-To work without Firebase credentials, set `AUTH_DEV_BYPASS_SUBJECT` to any
-string. Every request is then authenticated as that subject with no token, and
-a user row is provisioned on first use. This is honoured **only** when
-`APP_ENV=local`; set in any other environment the app returns 503 rather than
-accepting it, and a warning is logged on every bypassed request.
+Credentials for verification come from Application Default Credentials:
+`gcloud auth application-default login` locally, the metadata server on Cloud
+Run. `FIREBASE_PROJECT_ID` pins the audience; verification is refused outright
+without it, because an unpinned audience would accept tokens minted by any
+Firebase project.
+
+`/internal/ingest` is the exception, and not an unguarded one: the service is
+public because it serves the SPA, so Cloud Run IAM cannot protect that route.
+It verifies the OIDC token Cloud Tasks signs — issuer, audience pinned to
+`SERVICE_BASE_URL`, and the service account email — in
+[`app/auth/oidc.py`](app/auth/oidc.py).
 
 ## Frontend
 
-A Vite + React SPA in [`frontend/`](frontend/). It talks to the API through
-Vite's dev proxy, so the browser stays same-origin and the backend needs no
-CORS middleware.
+A Vite + React SPA in [`frontend/`](frontend/), **served by FastAPI** from the
+same origin as the API. That is what keeps CORS middleware out of the backend
+entirely and the SSE stream first-party — see [`app/spa.py`](app/spa.py).
 
 ```bash
-uvicorn app.main:app --reload --port 8000   # backend first
-cd frontend && npm install && npm run dev   # then http://localhost:5173
+cd frontend && npm install && npm run build
+cd .. && uvicorn app.main:app --reload    # then http://127.0.0.1:8000
 ```
+
+There is deliberately no dev-server proxy. It would recreate the one thing this
+arrangement avoids: a development request path that differs from the deployed
+one, where a same-origin assumption holds locally and quietly fails once it is
+real. Rebuild the bundle to see frontend changes.
 
 Scope is papers, sessions, chat and citations. The learner-memory, concept-graph
 and quiz views wait on agent tools 2–5; the SPA renders `memory_used` as nothing
@@ -203,15 +265,18 @@ was consulted.
 
 ```bash
 npm run verify        # offline: markdown/citation pipeline, SSE framing, rendering
-npm run verify:live   # one real turn against a running backend (costs model quota)
+
+# One real turn against the deployed service, signed in as a real user.
+# Costs model quota.
+DEMO_EMAIL=judge@research-companion.demo DEMO_PASSWORD=... npm run verify:live
 ```
 
 `verify/stream.mjs` replays a real turn's wire text at every chunk size from one
 byte upward, because a frame straddling a network-chunk boundary is the failure
-mode that would silently drop an event. `verify/live.mjs` drives the SPA's own
-client and stream modules over the proxy and asserts the event order, the
-citation click-through, and that the durable transcript matches what was
-streamed.
+mode that would silently drop an event. `verify/live.mjs` signs in through Identity
+Toolkit, drives the SPA's own client and stream modules against
+`PAPER_COMPANION_URL`, and asserts the event order, the citation
+click-through, and that the durable transcript matches what was streamed.
 
 ### Citations in the client
 

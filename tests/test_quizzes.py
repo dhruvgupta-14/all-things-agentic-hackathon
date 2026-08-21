@@ -25,7 +25,6 @@ from app.db.models import (
     User,
 )
 from app.ingestion.concepts import normalize_name
-from app.services.embeddings import get_embedder
 from app.services.quizzes import (
     NEXT_EXPLAIN_DIFFERENTLY,
     NEXT_MOVE_FORWARD,
@@ -37,8 +36,8 @@ from app.services.quizzes import (
     Grading,
     QuizService,
     QuizUnavailable,
-    StubQuizAuthor,
 )
+from tests.fakes import HashingEmbedder, StubQuizAuthor
 
 
 class _ScriptedGrader:
@@ -105,7 +104,7 @@ async def _setup(db_session: AsyncSession, **preferences):
         user_id=user.user_id,
         canonical_name="Variational lower bound",
         normalized_name=normalize_name("Variational lower bound"),
-        embedding=get_embedder().embed_query("Variational lower bound"),
+        embedding=HashingEmbedder().embed_query("Variational lower bound"),
     )
     db_session.add(concept)
     await db_session.flush()

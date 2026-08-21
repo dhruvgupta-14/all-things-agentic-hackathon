@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Chunk, Paper, Section, UserPaperAccess
 from app.ingestion.pipeline import PermanentIngestionError, ingest_paper
-from app.services.storage import LocalStorage
 from tests.conftest import build_pdf
+from tests.fakes import InMemoryStorage
 
 PAPER_PAGES = [
     "Attention Mechanisms In Practice\nJane Doe and John Roe\n"
@@ -25,7 +25,7 @@ PAPER_PAGES = [
 ]
 
 
-async def _seed_paper(session: AsyncSession, storage: LocalStorage, pages) -> Paper:
+async def _seed_paper(session: AsyncSession, storage: InMemoryStorage, pages) -> Paper:
     data = build_pdf(pages)
     content_hash = uuid.uuid4().hex + uuid.uuid4().hex[:32]
     paper = Paper(
@@ -39,12 +39,12 @@ async def _seed_paper(session: AsyncSession, storage: LocalStorage, pages) -> Pa
 
 
 @pytest.fixture
-def storage(storage_dir) -> LocalStorage:
-    return LocalStorage(storage_dir)
+def storage(storage_backend) -> InMemoryStorage:
+    return storage_backend
 
 
 async def test_ingest_produces_sections_and_chunks(
-    db_session: AsyncSession, storage: LocalStorage
+    db_session: AsyncSession, storage: InMemoryStorage
 ):
     paper = await _seed_paper(db_session, storage, PAPER_PAGES)
 
@@ -72,7 +72,7 @@ async def test_ingest_produces_sections_and_chunks(
 
 
 async def test_ingest_finishes_ready_with_no_phase_left(
-    db_session: AsyncSession, storage: LocalStorage
+    db_session: AsyncSession, storage: InMemoryStorage
 ):
     """A fully readable paper ends `ready`, with the phase cleared."""
     paper = await _seed_paper(db_session, storage, PAPER_PAGES)
@@ -86,7 +86,7 @@ async def test_ingest_finishes_ready_with_no_phase_left(
 
 
 async def test_reference_chunks_are_excluded_from_the_index(
-    db_session: AsyncSession, storage: LocalStorage
+    db_session: AsyncSession, storage: InMemoryStorage
 ):
     paper = await _seed_paper(db_session, storage, PAPER_PAGES)
     await ingest_paper(db_session, paper.paper_id, storage=storage)
@@ -106,7 +106,7 @@ async def test_reference_chunks_are_excluded_from_the_index(
     assert excluded > 0
 
 
-async def test_reingest_is_idempotent(db_session: AsyncSession, storage: LocalStorage):
+async def test_reingest_is_idempotent(db_session: AsyncSession, storage: InMemoryStorage):
     """A retry re-runs from the top, so it must not double the rows."""
     paper = await _seed_paper(db_session, storage, PAPER_PAGES)
 
@@ -124,7 +124,7 @@ async def test_reingest_is_idempotent(db_session: AsyncSession, storage: LocalSt
 
 
 async def test_corrupt_pdf_fails_permanently_with_a_typed_code(
-    db_session: AsyncSession, storage: LocalStorage
+    db_session: AsyncSession, storage: InMemoryStorage
 ):
     content_hash = uuid.uuid4().hex + uuid.uuid4().hex[:32]
     paper = Paper(
@@ -145,11 +145,11 @@ async def test_corrupt_pdf_fails_permanently_with_a_typed_code(
 
 
 async def test_missing_original_is_permanent_not_transient(
-    db_session: AsyncSession, storage: LocalStorage
+    db_session: AsyncSession, storage: InMemoryStorage
 ):
     paper = Paper(
         content_hash=uuid.uuid4().hex + uuid.uuid4().hex[:32],
-        storage_uri="file://nothing-here.pdf",
+        storage_uri="memory://nothing-here.pdf",
         processing_status="queued",
     )
     db_session.add(paper)
@@ -171,22 +171,22 @@ def no_background(monkeypatch):
 
     Patched at the dispatch seam rather than at the job functions: the real
     job opens its own session and commits, which would escape the per-test
-    transaction, and under a queue the router never calls the job directly at
-    all. The pipeline itself is covered above; `tests/test_task_dispatch.py`
-    covers which way dispatch sends it.
+    transaction, and the router never calls a job directly — it enqueues. The
+    pipeline itself is covered above; `tests/test_task_dispatch.py` covers what
+    reaches the queue.
     """
     enqueued: list = []
 
-    async def fake_dispatch(job, paper_id, user_id, *, background_tasks):
+    async def fake_dispatch(job, paper_id, user_id):
         enqueued.append((job, paper_id))
-        return "in-process"
+        return "tasks/1"
 
     monkeypatch.setattr("app.routers.papers.dispatch", fake_dispatch)
     return enqueued
 
 
 async def test_upload_accepts_a_pdf_and_enqueues_ingestion(
-    client: AsyncClient, db_session: AsyncSession, dev_auth, storage_dir, no_background
+    client: AsyncClient, db_session: AsyncSession, signed_in, storage_backend, no_background
 ):
     response = await client.post(
         "/api/papers",
@@ -205,7 +205,7 @@ async def test_upload_accepts_a_pdf_and_enqueues_ingestion(
 
 
 async def test_upload_rejects_non_pdf_by_sniffing_content(
-    client: AsyncClient, dev_auth, storage_dir, no_background
+    client: AsyncClient, signed_in, storage_backend, no_background
 ):
     """The declared type is not trusted; the bytes are."""
     response = await client.post(
@@ -217,14 +217,14 @@ async def test_upload_rejects_non_pdf_by_sniffing_content(
 
 
 async def test_upload_rejects_an_empty_file(
-    client: AsyncClient, dev_auth, storage_dir, no_background
+    client: AsyncClient, signed_in, storage_backend, no_background
 ):
     response = await client.post("/api/papers", files={"file": ("x.pdf", b"", "application/pdf")})
     assert response.status_code == 400
 
 
 async def test_upload_enforces_the_size_cap(
-    client: AsyncClient, dev_auth, storage_dir, settings_env, no_background
+    client: AsyncClient, signed_in, storage_backend, settings_env, no_background
 ):
     settings_env(max_upload_bytes="1024")
     response = await client.post(
@@ -234,7 +234,7 @@ async def test_upload_enforces_the_size_cap(
 
 
 async def test_upload_enforces_the_page_cap(
-    client: AsyncClient, dev_auth, storage_dir, settings_env, no_background
+    client: AsyncClient, signed_in, storage_backend, settings_env, no_background
 ):
     settings_env(max_page_count="2")
     response = await client.post(
@@ -245,7 +245,7 @@ async def test_upload_enforces_the_page_cap(
 
 
 async def test_identical_bytes_are_not_ingested_twice(
-    client: AsyncClient, db_session: AsyncSession, dev_auth, storage_dir, no_background
+    client: AsyncClient, db_session: AsyncSession, signed_in, storage_backend, no_background
 ):
     """Content hash is the idempotency key (ARCHITECTURE 8.3)."""
     data = build_pdf(PAPER_PAGES)
@@ -269,7 +269,7 @@ async def test_identical_bytes_are_not_ingested_twice(
 
 
 async def test_upload_by_a_second_user_grants_access_without_reingesting(
-    client: AsyncClient, db_session: AsyncSession, dev_auth, storage_dir, no_background
+    client: AsyncClient, db_session: AsyncSession, signed_in, storage_backend, no_background
 ):
     """Chunks are paper-scoped and shared; only the grant is per-user."""
     data = build_pdf(PAPER_PAGES)
@@ -286,7 +286,7 @@ async def test_upload_by_a_second_user_grants_access_without_reingesting(
 
 
 async def test_get_paper_hides_unauthorized_ids_as_404(
-    client: AsyncClient, db_session: AsyncSession, dev_auth, storage: LocalStorage
+    client: AsyncClient, db_session: AsyncSession, signed_in, storage: InMemoryStorage
 ):
     """A 403 would confirm the id is real to someone with no access."""
     paper = await _seed_paper(db_session, storage, PAPER_PAGES)
@@ -296,7 +296,7 @@ async def test_get_paper_hides_unauthorized_ids_as_404(
 
 
 async def test_get_paper_reports_status_for_polling(
-    client: AsyncClient, dev_auth, storage_dir, no_background
+    client: AsyncClient, signed_in, storage_backend, no_background
 ):
     created = await client.post(
         "/api/papers", files={"file": ("p.pdf", build_pdf(PAPER_PAGES), "application/pdf")}

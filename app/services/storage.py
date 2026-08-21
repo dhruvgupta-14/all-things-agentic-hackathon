@@ -1,15 +1,20 @@
-"""Object storage behind a two-method seam.
+"""Object storage: one private Cloud Storage bucket.
 
-Local development writes to a directory; deployment swaps in Cloud Storage
-without the ingestion pipeline noticing. Only the backend knows how a URI maps
-to bytes — callers pass the URI around and never build a filesystem path from
-user input (`papers.original_filename` is display-only, per ARCHITECTURE 4.3).
+The `Storage` protocol stays because the ingestion pipeline takes a backend
+rather than reaching for a global, which is what makes it testable. What is
+gone is the *filesystem* implementation that used to stand in when no bucket
+was configured: on Cloud Run that wrote uploaded PDFs to a container disk which
+is discarded on every restart, so papers ingested successfully and then could
+not be re-read. An unset bucket is now a startup failure, not a quiet downgrade.
+
+Only the backend knows how a URI maps to bytes — callers pass the URI around
+and never build a filesystem path from user input (`papers.original_filename`
+is display-only, per ARCHITECTURE 4.3).
 """
 
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 from typing import Protocol
 
 from app.config import get_settings
@@ -28,37 +33,6 @@ class Storage(Protocol):
         ...
 
 
-class LocalStorage:
-    """Filesystem backend for local development."""
-
-    def __init__(self, root: str | Path) -> None:
-        self._root = Path(root).resolve()
-        self._root.mkdir(parents=True, exist_ok=True)
-
-    def _path_for(self, name: str) -> Path:
-        # Resolve and re-check containment: the name is derived from a hash we
-        # computed, but this class must not become a path-traversal primitive
-        # if a caller ever passes something else.
-        candidate = (self._root / name).resolve()
-        if not candidate.is_relative_to(self._root):
-            raise ValueError(f"refusing to address {name!r} outside the storage root")
-        return candidate
-
-    def put(self, data: bytes, *, content_hash: str) -> str:
-        name = f"{content_hash}.pdf"
-        self._path_for(name).write_bytes(data)
-        return f"file://{name}"
-
-    def get(self, uri: str) -> bytes:
-        if not uri.startswith("file://"):
-            raise ObjectNotFoundError(f"not a local storage uri: {uri!r}")
-        path = self._path_for(uri.removeprefix("file://"))
-        try:
-            return path.read_bytes()
-        except FileNotFoundError as exc:
-            raise ObjectNotFoundError(uri) from exc
-
-
 class GCSStorage:
     """Cloud Storage backend. Private objects, uniform bucket-level access."""
 
@@ -66,7 +40,7 @@ class GCSStorage:
         self._bucket_name = bucket
 
     def _bucket(self):
-        from google.cloud import storage  # imported lazily: local dev has no creds
+        from google.cloud import storage  # lazily: constructing a client resolves credentials
 
         return storage.Client().bucket(self._bucket_name)
 
@@ -86,10 +60,7 @@ class GCSStorage:
 
 
 def get_storage() -> Storage:
-    settings = get_settings()
-    if settings.storage_bucket:
-        return GCSStorage(settings.storage_bucket)
-    return LocalStorage(settings.local_storage_dir)
+    return GCSStorage(get_settings().storage_bucket)
 
 
 def new_object_name() -> str:

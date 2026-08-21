@@ -22,8 +22,8 @@ from app.services.callbacks import (
     SUPPRESSED_RATE_LIMITED,
     CallbackService,
 )
-from app.services.embeddings import get_embedder
 from app.services.memory import MemoryService
+from tests.fakes import HashingEmbedder
 
 
 async def _user(session: AsyncSession, **preferences) -> User:
@@ -61,7 +61,7 @@ async def _concept(
         user_id=user.user_id,
         canonical_name=name,
         normalized_name=normalize_name(name),
-        embedding=get_embedder().embed_query(name),
+        embedding=HashingEmbedder().embed_query(name),
         source_paper_ids=papers or [],
         understanding_score=score,
         score_confidence=confidence,
@@ -123,7 +123,7 @@ async def _scenario(
 
 
 async def _decide(db_session, user, active_paper, query="reverse process"):
-    memory = MemoryService(db_session, embedder=get_embedder())
+    memory = MemoryService(db_session, embedder=HashingEmbedder())
     prefetched = await memory.prefetch(user.user_id, query)
     return await CallbackService(db_session).decide(
         user=user,
@@ -344,7 +344,7 @@ async def test_the_gate_never_reaches_another_readers_memory(
     user, _, paper_b, _, _ = await _scenario(db_session)
     stranger = await _user(db_session)
 
-    memory = MemoryService(db_session, embedder=get_embedder())
+    memory = MemoryService(db_session, embedder=HashingEmbedder())
     prefetched = await memory.prefetch(stranger.user_id, "reverse process")
     decision = await CallbackService(db_session).decide(
         user=stranger, active_paper_id=paper_b.paper_id, prefetched=prefetched

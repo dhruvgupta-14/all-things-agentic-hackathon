@@ -9,15 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Concept, ConceptRelationship, Paper, User
 from app.ingestion.concepts import ConceptService, normalize_name
 from app.ingestion.pipeline import canonicalize_existing_paper, ingest_paper
-from app.services.adjudication import Adjudication, ConservativeAdjudicator
-from app.services.analysis import (
-    ConceptCandidate,
-    HeuristicAnalyzer,
-    PaperAnalysis,
-)
-from app.services.embeddings import HashingEmbedder
-from app.services.storage import LocalStorage
+from app.services.adjudication import Adjudication
+from app.services.analysis import ConceptCandidate, PaperAnalysis
 from tests.conftest import build_pdf
+from tests.fakes import ConservativeAdjudicator, HashingEmbedder, HeuristicAnalyzer, InMemoryStorage
 
 PAPER_PAGES = [
     "Attention Mechanisms\nAbstract\nScaled dot product attention improves translation.\n"
@@ -28,8 +23,8 @@ PAPER_PAGES = [
 
 
 @pytest.fixture
-def storage(storage_dir) -> LocalStorage:
-    return LocalStorage(storage_dir)
+def storage(storage_backend) -> InMemoryStorage:
+    return storage_backend
 
 
 @pytest.fixture

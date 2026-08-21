@@ -38,8 +38,12 @@ from app.services.callbacks import SUPPRESSED_RATE_LIMITED, CallbackService
 from app.services.learner_state import recompute
 from app.services.memory import MemoryService
 from app.services.signals import SignalService
+from scripts.demo_identity import resolve_uid
 
-DEMO_SUBJECT = "local-dev-user"
+# The demo reader is a real Firebase account now; there is no bypass
+# identity to fall back on. Resolved rather than pasted, so the four
+# scripts cannot drift onto different readers.
+DEMO_SUBJECT = resolve_uid()
 
 # The pair the demo rests on. Both are real concepts canonicalized from the
 # demo papers, connected by an edge written at ingest.

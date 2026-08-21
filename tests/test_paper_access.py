@@ -33,10 +33,10 @@ async def _current_user(session: AsyncSession, subject: str) -> User:
 
 
 async def test_granted_paper_is_listed(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     await client.get("/api/me")  # provision the caller
-    user = await _current_user(db_session, dev_auth)
+    user = await _current_user(db_session, signed_in)
     paper = await _make_paper(db_session, "Attention Is All You Need")
 
     db_session.add(
@@ -53,7 +53,7 @@ async def test_granted_paper_is_listed(
 
 
 async def test_ungranted_paper_is_invisible(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     """The paper exists and is ready; no grant means it does not appear."""
     await client.get("/api/me")
@@ -63,10 +63,10 @@ async def test_ungranted_paper_is_invisible(
 
 
 async def test_revoked_grant_hides_the_paper_immediately(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     await client.get("/api/me")
-    user = await _current_user(db_session, dev_auth)
+    user = await _current_user(db_session, signed_in)
     paper = await _make_paper(db_session, "Revoked Paper")
 
     grant = UserPaperAccess(user_id=user.user_id, paper_id=paper.paper_id)
@@ -82,7 +82,7 @@ async def test_revoked_grant_hides_the_paper_immediately(
 
 
 async def test_another_users_grant_does_not_leak(
-    client: AsyncClient, db_session: AsyncSession, dev_auth: str
+    client: AsyncClient, db_session: AsyncSession, signed_in: str
 ):
     await client.get("/api/me")
     paper = await _make_paper(db_session, "Private To Someone Else")

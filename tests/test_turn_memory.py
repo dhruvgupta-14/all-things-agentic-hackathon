@@ -24,9 +24,8 @@ from app.db.models import (
 )
 from app.ingestion.concepts import normalize_name
 from app.schemas.sse import decode
-from app.services.embeddings import get_embedder
-from app.services.storage import LocalStorage
 from tests.conftest import build_pdf
+from tests.fakes import HashingEmbedder, InMemoryStorage
 
 PAGES = [
     "Variational Inference\nAbstract\nThe evidence lower bound is optimised.\n"
@@ -37,8 +36,8 @@ PAGES = [
 
 
 @pytest.fixture
-def storage(storage_dir) -> LocalStorage:
-    return LocalStorage(storage_dir)
+def storage(storage_backend) -> InMemoryStorage:
+    return storage_backend
 
 
 @pytest.fixture
@@ -82,10 +81,10 @@ def agent(monkeypatch):
 
 
 async def _reader(
-    db_session: AsyncSession, storage: LocalStorage
+    db_session: AsyncSession, storage: InMemoryStorage
 ) -> tuple[User, Paper, Session]:
     from app.ingestion.pipeline import ingest_paper
-    from app.services.embeddings import HashingEmbedder
+    
 
     user = User(auth_subject=f"turn-memory-{uuid.uuid4()}")
     db_session.add(user)
@@ -147,14 +146,14 @@ async def _seed_concept(db_session, user, name: str, **kwargs) -> Concept:
             user_id=user.user_id,
             canonical_name=name,
             normalized_name=normalized,
-            embedding=get_embedder().embed_query(name),
+            embedding=HashingEmbedder().embed_query(name),
         )
         db_session.add(concept)
 
     for attribute, value in kwargs.items():
         setattr(concept, attribute, value)
     if concept.embedding is None:
-        concept.embedding = get_embedder().embed_query(name)
+        concept.embedding = HashingEmbedder().embed_query(name)
 
     await db_session.flush()
     return concept

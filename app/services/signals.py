@@ -43,7 +43,8 @@ from app.db.models import (
     Observation,
 )
 from app.ingestion.concepts import normalize_name
-from app.services.embeddings import Embedder, get_embedder
+from app.services import embeddings
+from app.services.embeddings import Embedder
 from app.services.learner_state import LearnerState, derive, recompute, weight_for
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,7 @@ class SignalService:
         self, session: AsyncSession, *, embedder: Embedder | None = None
     ) -> None:
         self._session = session
-        self._embedder = embedder or get_embedder()
+        self._embedder = embedder or embeddings.get_embedder()
 
     async def _recall_or_create(
         self,

@@ -35,7 +35,7 @@ from app.ingestion.pipeline import (
     TransientIngestionError,
     ingest_paper,
 )
-from app.services.embeddings import get_embedder
+from app.services import embeddings
 
 # Only papers that were successfully ingested can be stale. A `failed` or
 # `queued` paper has no vectors to be in the wrong space.
@@ -59,7 +59,7 @@ async def find_stale(session, active_model: str) -> list[Paper]:
 
 
 async def list_state() -> None:
-    active = get_embedder().model_name
+    active = embeddings.get_embedder().model_name
     async with async_session_factory() as session:
         rows = (
             await session.execute(
@@ -84,7 +84,7 @@ async def list_state() -> None:
 
 
 async def reindex(paper_ids: list[uuid.UUID] | None, stale_only: bool, dry_run: bool) -> int:
-    embedder = get_embedder()
+    embedder = embeddings.get_embedder()
     active = embedder.model_name
     failures = 0
 

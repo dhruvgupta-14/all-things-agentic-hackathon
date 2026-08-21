@@ -97,28 +97,20 @@ def test_the_query_plan_settings_travel_with_the_application(setting: str):
 # --------------------------------------------------------------------------
 
 
-def test_local_runs_never_touch_the_connector(settings_env):
-    """`CLOUD_SQL_INSTANCE` unset must keep the plain host:port DSN, and must
-    not import a connector that would then want credentials."""
-    from app.config import get_settings
+def test_there_is_one_database_and_it_is_cloud_sql(settings_env):
+    """No branch left to take.
 
-    settings_env(CLOUD_SQL_INSTANCE=None)
+    Both DSNs used to have a second form reaching a local Postgres on
+    DB_HOST/DB_PORT, chosen by whether CLOUD_SQL_INSTANCE happened to be set.
+    That meant the application could be exercised at length against a database
+    configured differently from the one it would run on — which is exactly how
+    `hnsw.iterative_scan` came to be wrong on the first Cloud SQL instance
+    while every local run looked healthy.
+    """
+    from app.config import Settings, get_settings
+
     settings = get_settings()
 
-    assert settings.uses_cloud_sql is False
-    assert "@" in settings.database_url, "expected a host:port DSN"
-    assert "@" in settings.sync_database_url
-
-
-def test_setting_an_instance_switches_both_engines(settings_env):
-    """The async engine and Alembic's sync engine must agree about where the
-    database is, or a migration lands somewhere the app never reads."""
-    from app.config import get_settings
-
-    settings_env(CLOUD_SQL_INSTANCE="proj:us-central1:paper-companion")
-    settings = get_settings()
-
-    assert settings.uses_cloud_sql is True
     # No host in either URL: the connector supplies the connection, and a stray
     # host would silently dial somewhere else.
     assert settings.database_url == "postgresql+asyncpg://"
@@ -126,6 +118,14 @@ def test_setting_an_instance_switches_both_engines(settings_env):
     # socket, which Windows does not have, and migrations run from whatever
     # laptop the operator is using.
     assert settings.sync_database_url == "postgresql+pg8000://"
+
+    # The settings that selected the local path are gone, not merely unused.
+    for field in ("db_host", "db_port", "uses_cloud_sql"):
+        assert field not in Settings.model_fields
+
+    # And the instance is required, so an unset one is a startup failure rather
+    # than a silent fallback.
+    assert Settings.model_fields["cloud_sql_instance"].is_required()
 
 
 def test_the_query_plan_settings_reach_the_cloud_sql_connection():
@@ -168,9 +168,8 @@ def test_the_cloud_sql_engine_pre_pings():
     """Cloud SQL closes idle connections; a pooled-but-dead one would surface
     as a failed turn rather than a reconnect."""
     source = (REPO / "app" / "db" / "base.py").read_text(encoding="utf-8")
-    cloud_sql_branch = source.split("if settings.uses_cloud_sql:")[1]
 
-    assert "pool_pre_ping" in cloud_sql_branch
+    assert "pool_pre_ping=True" in source
 
 
 def test_the_connector_is_not_shared_across_event_loops():
@@ -185,10 +184,24 @@ def test_the_connector_is_not_shared_across_event_loops():
     assert "Connector(loop=loop)" in source
 
 
-def test_alembic_uses_the_connector_when_configured():
+def test_alembic_uses_the_connector():
     """Migrations run before the revision that needs them is deployed, so they
     cannot rely on Cloud Run's unix socket."""
     env = (REPO / "alembic" / "env.py").read_text(encoding="utf-8")
 
-    assert "uses_cloud_sql" in env
     assert "sync_creator" in env
+
+
+def test_alembics_only_escape_hatch_is_explicit():
+    """`ALEMBIC_DATABASE_URL` points migrations at the test database, and it is
+    the one place in this repository that reaches a database other than Cloud
+    SQL. It must stay an argument to the migration tool — if the application
+    ever read it, the local path would be back under a different name."""
+    env = (REPO / "alembic" / "env.py").read_text(encoding="utf-8")
+    assert "ALEMBIC_DATABASE_URL" in env
+
+    app_sources = [
+        path.read_text(encoding="utf-8")
+        for path in (REPO / "app").rglob("*.py")
+    ]
+    assert not any("ALEMBIC_DATABASE_URL" in source for source in app_sources)

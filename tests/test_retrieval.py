@@ -8,14 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Chunk, Paper, User, UserPaperAccess
 from app.ingestion.pipeline import ingest_paper
-from app.services.embeddings import HashingEmbedder
 from app.services.retrieval import (
     RetrievalScopeViolation,
     RetrievalService,
     authorized_paper_scope,
 )
-from app.services.storage import LocalStorage
 from tests.conftest import build_pdf
+from tests.fakes import HashingEmbedder, InMemoryStorage
 
 ATTENTION_PAPER = [
     "Attention Mechanisms\nAbstract\nWe study attention for machine translation.\n"
@@ -33,8 +32,8 @@ PROTEIN_PAPER = [
 
 
 @pytest.fixture
-def storage(storage_dir) -> LocalStorage:
-    return LocalStorage(storage_dir)
+def storage(storage_backend) -> InMemoryStorage:
+    return storage_backend
 
 
 @pytest.fixture

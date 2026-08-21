@@ -24,8 +24,12 @@ from sqlalchemy import select
 from app.db.base import async_session_factory
 from app.db.models import Paper, Session, User, UserPaperAccess
 from app.schemas.sse import decode
+from scripts.demo_identity import resolve_uid
 
-DEMO_SUBJECT = "local-dev-user"
+# The demo reader is a real Firebase account now; there is no bypass
+# identity to fall back on. Resolved rather than pasted, so the four
+# scripts cannot drift onto different readers.
+DEMO_SUBJECT = resolve_uid()
 
 # Representative of the demo: a definition, a mechanism, and a comparison.
 # Deliberately different shapes — a one-search question and a multi-search one

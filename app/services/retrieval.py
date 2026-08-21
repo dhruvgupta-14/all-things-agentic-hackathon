@@ -25,7 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.models import Chunk, Paper, Section, UserPaperAccess
-from app.services.embeddings import Embedder, get_embedder
+from app.services import embeddings
+from app.services.embeddings import Embedder
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class RetrievalService:
         embedder: Embedder | None = None,
     ) -> None:
         self._session = session
-        self._embedder = embedder or get_embedder()
+        self._embedder = embedder or embeddings.get_embedder()
         # Last embedding round-trip, for the turn breakdown.
         self.last_embed_ms: float = 0.0
 

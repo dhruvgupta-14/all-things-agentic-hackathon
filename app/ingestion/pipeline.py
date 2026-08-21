@@ -34,9 +34,12 @@ from app.ingestion.parser import (
     parse_pdf,
 )
 from app.ingestion.sectioner import detect_sections
-from app.services.analysis import Analyzer, ConceptCandidate, get_analyzer
-from app.services.embeddings import Embedder, get_embedder
-from app.services.storage import ObjectNotFoundError, Storage, get_storage
+from app.services import analysis as analysis_service
+from app.services import embeddings as embeddings_service
+from app.services import storage as storage_service
+from app.services.analysis import Analyzer, ConceptCandidate
+from app.services.embeddings import Embedder
+from app.services.storage import ObjectNotFoundError, Storage
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +110,7 @@ async def canonicalize_existing_paper(
     if paper is None or not paper.concept_candidates:
         return 0
     return await _canonicalize_for_user(
-        session, paper, user_id, embedder or get_embedder()
+        session, paper, user_id, embedder or embeddings_service.get_embedder()
     )
 
 
@@ -125,7 +128,7 @@ async def ingest_paper(
     Terminal states are written by this function; the caller only decides what
     HTTP status the queue sees.
     """
-    storage = storage or get_storage()
+    storage = storage or storage_service.get_storage()
 
     paper = await session.scalar(select(Paper).where(Paper.paper_id == paper_id))
     if paper is None:
@@ -216,7 +219,7 @@ async def ingest_paper(
         await session.flush()
 
         await _set_phase(session, paper, "embed")
-        embedder = embedder or get_embedder()
+        embedder = embedder or embeddings_service.get_embedder()
         # Only indexable chunks are embedded: reference entries are stored for
         # completeness but never retrieved, so a vector for them is waste.
         indexable = [row for row in chunk_rows if row.is_indexable]
@@ -240,7 +243,7 @@ async def ingest_paper(
 
         # --- Phase 6a: structural analysis, shared across readers ---------
         await _set_phase(session, paper, "analyze")
-        analyzer = analyzer or get_analyzer()
+        analyzer = analyzer or analysis_service.get_analyzer()
         if paper.concept_candidates is None:
             try:
                 analysis = analyzer.analyze(

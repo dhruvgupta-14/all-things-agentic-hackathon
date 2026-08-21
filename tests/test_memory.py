@@ -21,8 +21,8 @@ from app.db.models import (
     UserPaperAccess,
 )
 from app.ingestion.concepts import normalize_name
-from app.services.embeddings import get_embedder
 from app.services.memory import MemoryService
+from tests.fakes import HashingEmbedder
 
 
 async def _user(session: AsyncSession, tag: str = "memory") -> User:
@@ -51,7 +51,7 @@ async def _concept(
         user_id=user.user_id,
         canonical_name=name,
         normalized_name=normalize_name(name),
-        embedding=get_embedder().embed_query(name),
+        embedding=HashingEmbedder().embed_query(name),
         understanding_score=score,
         score_confidence=confidence,
         effective_style=style,
@@ -65,7 +65,7 @@ async def _concept(
 
 
 def _service(session: AsyncSession) -> MemoryService:
-    return MemoryService(session, embedder=get_embedder())
+    return MemoryService(session, embedder=HashingEmbedder())
 
 
 # --------------------------------------------------------------------------

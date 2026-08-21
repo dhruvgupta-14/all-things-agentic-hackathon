@@ -1,23 +1,21 @@
-"""The embedding seam.
+"""The embedding seam: `gemini-embedding-001` on Vertex AI.
 
-Local development uses a deterministic hashing embedder; deployment sets
-`vertex_project` and `gemini-embedding-001` takes over. Both produce unit
-vectors of the same dimensionality, so cosine distance behaves the same way
-and the retrieval code cannot tell them apart.
+`Embedder` stays a protocol because the pipeline and retrieval take an embedder
+rather than reaching for a global, which is what makes them testable — the
+suite supplies a deterministic fake from `tests/fakes.py`.
 
-The stub is a hashing-trick embedding, not random noise: tokens map to fixed
-dimensions, so texts sharing vocabulary genuinely score closer together. That
-makes retrieval testable offline. It is emphatically **not** semantic — it
-cannot match "car" to "automobile" — so relevance floors tuned against it will
-need revisiting once real embeddings are in play.
+What is gone is the *fallback*. `get_embedder()` used to return a hashing
+embedder when no project was configured, and that was the worst kind of
+default: ingestion completed, retrieval returned passages, citations verified,
+and none of it was semantic. A paper embedded that way is also permanently
+unsearchable against real vectors, because the two live in different spaces.
+Configuration is now required, so that state is unreachable.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
-import re
 from typing import Protocol
 
 from tenacity import (
@@ -33,22 +31,16 @@ from app.db.models import EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
 
-STUB_MODEL_NAME = "local-hashing-v1"
 GEMINI_MODEL_NAME = "gemini-embedding-001"
 
-# Two separate ceilings, both measured against the live API:
-#   * 100 texts per request is a hard cap — 250 returns 400 INVALID_ARGUMENT.
-#   * a free-tier key returns 429 well below that; 100 was already refused.
-# 20 is comfortably under both, so a 100-chunk paper becomes five requests
-# rather than one rejected one.
+# 100 texts per request is a hard cap — 250 returns 400 INVALID_ARGUMENT — and
+# request-rate quota bites well below it. 20 is comfortably under both, so a
+# 100-chunk paper becomes five requests rather than one rejected one.
 EMBED_BATCH_SIZE = 20
 
 
 class EmbeddingUnavailable(Exception):
     """The embedder could not produce vectors. Transient by assumption."""
-
-_TOKEN = re.compile(r"[a-z0-9]+")
-
 
 class Embedder(Protocol):
     @property
@@ -74,10 +66,6 @@ class Embedder(Protocol):
         ...
 
 
-def _tokenize(text: str) -> list[str]:
-    return _TOKEN.findall(text.lower())
-
-
 def _normalise(vector: list[float]) -> list[float]:
     norm = math.sqrt(sum(value * value for value in vector))
     if norm == 0.0:
@@ -88,60 +76,17 @@ def _normalise(vector: list[float]) -> list[float]:
     return [value / norm for value in vector]
 
 
-class HashingEmbedder:
-    """Deterministic local embedder. Same text always yields the same vector."""
-
-    def __init__(self, dim: int = EMBEDDING_DIM) -> None:
-        self._dim = dim
-
-    @property
-    def model_name(self) -> str:
-        return STUB_MODEL_NAME
-
-    @property
-    def default_min_similarity(self) -> float:
-        # Lexical overlap scores lower and flatter than semantic similarity.
-        return 0.25
-
-    def _embed_one(self, text: str) -> list[float]:
-        vector = [0.0] * self._dim
-        tokens = _tokenize(text)
-        for token in tokens:
-            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-            index = int.from_bytes(digest[:4], "big") % self._dim
-            # A sign bit keeps unrelated collisions from always reinforcing.
-            vector[index] += 1.0 if digest[4] & 1 else -1.0
-        return _normalise(vector)
-
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return [self._embed_one(text) for text in texts]
-
-    def embed_query(self, text: str) -> list[float]:
-        return self._embed_one(text)
-
-
 class GeminiEmbedder:
-    """`gemini-embedding-001` at reduced output dimensionality.
-
-    Reachable two ways — an AI Studio API key, or Vertex AI with ADC. They are
-    the same model, so `model_name` is deliberately identical for both: the
-    vectors are interchangeable, and moving from one transport to the other
-    must not make every existing paper look stale and trigger a pointless
-    re-index.
-    """
+    """`gemini-embedding-001` at reduced output dimensionality, on Vertex AI."""
 
     def __init__(
         self,
         *,
-        api_key: str | None = None,
-        project: str | None = None,
-        location: str | None = None,
+        project: str,
+        location: str,
         dim: int = EMBEDDING_DIM,
         batch_size: int = EMBED_BATCH_SIZE,
     ) -> None:
-        if not api_key and not project:
-            raise ValueError("GeminiEmbedder needs either an api_key or a project")
-        self._api_key = api_key
         self._project = project
         self._location = location
         self._dim = dim
@@ -164,7 +109,7 @@ class GeminiEmbedder:
     @property
     def transport(self) -> str:
         """Which backend serves the calls. Diagnostics only — not identity."""
-        return "vertex" if self._project else "ai-studio"
+        return "vertex"
 
     def _get_client(self):
         # Shared per process: building one costs a ~12s credential and TLS
@@ -173,7 +118,6 @@ class GeminiEmbedder:
             from app.services.genai_client import get_genai_client
 
             self._client = get_genai_client(
-                api_key=self._api_key,
                 project=self._project,
                 location=self._location,
             )
@@ -181,7 +125,7 @@ class GeminiEmbedder:
 
     @retry(
         retry=retry_if_exception_type(EmbeddingUnavailable),
-        # The free tier caps embeddings at 100 requests per *minute*, and the
+        # Embedding quota is counted per *minute*, and the
         # API's own retry hint is around 45s. Backing off to 20s exhausts the
         # attempts inside the window and fails a job that would have succeeded
         # by simply waiting.
@@ -205,7 +149,7 @@ class GeminiEmbedder:
                 ),
             )
         except Exception as exc:
-            # Rate limits are the expected failure on a free-tier key, and they
+            # Rate limits are the expected transient failure here, and they
             # are worth waiting out rather than failing an ingestion job.
             raise EmbeddingUnavailable(f"{type(exc).__name__}: {exc}") from exc
 
@@ -218,8 +162,7 @@ class GeminiEmbedder:
         # dimensions. Truncating to 768 (Matryoshka) leaves them un-normalised
         # — measured norm ~0.58 — so we re-normalise here. Cosine distance is
         # scale-invariant and would rank correctly either way, but unit vectors
-        # are what Google's guidance specifies for reduced dimensionality, and
-        # they keep the stored vectors comparable to the local stub's.
+        # are what Google's guidance specifies for reduced dimensionality.
         return [_normalise(vector) for vector in vectors]
 
     def _embed(self, texts: list[str], task_type: str) -> list[list[float]]:
@@ -240,14 +183,14 @@ class GeminiEmbedder:
 
 
 def get_embedder() -> Embedder:
+    """The application's embedder. One backend, no branch.
+
+    Called through the module (`embeddings.get_embedder()`) rather than
+    imported by name, so the test harness has a single place to substitute a
+    deterministic fake. An imported binding would have to be patched in every
+    module that took a copy.
+    """
     settings = get_settings()
-    # Vertex first: a deployment given a project must not silently fall back to
-    # a developer's personal API key.
-    if settings.vertex_project:
-        return GeminiEmbedder(
-            project=settings.vertex_project, location=settings.vertex_location
-        )
-    if settings.gemini_api_key:
-        return GeminiEmbedder(api_key=settings.gemini_api_key)
-    logger.debug("using the local hashing embedder; retrieval will be lexical only")
-    return HashingEmbedder()
+    return GeminiEmbedder(
+        project=settings.vertex_project, location=settings.vertex_location
+    )

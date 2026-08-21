@@ -22,7 +22,6 @@ from app.auth.firebase import (
     VerifiedToken,
     verify_id_token,
 )
-from app.config import get_settings
 from app.db.base import get_db
 from app.db.models import User
 
@@ -92,58 +91,20 @@ async def _resolve_user(session: AsyncSession, token: VerifiedToken) -> User:
     return created
 
 
-def _dev_bypass_token() -> VerifiedToken | None:
-    """The local-development escape hatch, or None when it is not in play.
-
-    Two independent conditions must hold: an explicitly configured subject,
-    and `app_env == "local"`. A subject configured anywhere else raises rather
-    than being quietly ignored — silently disregarding a credential-shaped
-    setting is how a bypass survives to production unnoticed.
-    """
-    settings = get_settings()
-    subject = settings.auth_dev_bypass_subject
-    if not subject:
-        return None
-
-    if settings.app_env != "local":
-        raise AuthConfigurationError(
-            f"AUTH_DEV_BYPASS_SUBJECT is set but APP_ENV is {settings.app_env!r}. "
-            "The development auth bypass is only permitted when APP_ENV=local."
-        )
-
-    logger.warning(
-        "AUTH BYPASS ACTIVE — request authenticated as %r without a token. "
-        "This must never be enabled outside local development.",
-        subject,
-    )
-    return VerifiedToken(
-        subject=subject,
-        email=f"{subject}@local.invalid",
-        display_name="Local Development User",
-    )
-
-
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: AsyncSession = Depends(get_db),
 ) -> Principal:
-    try:
-        bypass = _dev_bypass_token()
-    except AuthConfigurationError as exc:
-        logger.error("auth misconfigured: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Authentication is misconfigured on this deployment.",
-        ) from exc
+    """The only way a request acquires an identity.
 
-    if bypass is not None:
-        user = await _resolve_user(session, bypass)
-        return Principal(
-            user_id=user.user_id,
-            auth_subject=user.auth_subject,
-            email=user.email,
-        )
-
+    There is deliberately no second path. This used to accept a configured
+    subject with no token presented, for local development — and the cost of
+    that convenience was that the application most people ran day to day was
+    not the application that would be deployed: unauthenticated locally,
+    authenticated in production, with the difference invisible until something
+    behaved differently. Every caller now presents a Firebase ID token,
+    wherever the process happens to be running.
+    """
     if credentials is None or not credentials.credentials:
         raise _UNAUTHENTICATED
 

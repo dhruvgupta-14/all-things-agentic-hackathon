@@ -66,8 +66,13 @@ added `pyproject.toml` and `uv.lock` in `cfeaa42`; **that file is missing
 
 ### 3.1 Prerequisites
 
-- Python 3.12+, Node 22+, Docker Desktop
-- A Gemini API key from [AI Studio](https://aistudio.google.com/apikey) (free tier)
+- Python 3.12+, Node 22+, Docker Desktop (Docker is for the **test** database only)
+- Access to the GCP project, and `gcloud auth application-default login`
+
+There is no local mode. Firebase, Cloud SQL, Cloud Storage, Cloud Tasks and
+Vertex AI are all required; a missing setting is a startup failure, not a
+fallback. `localhost` is an address, not a mode — the same services, the same
+login, the same data.
 
 ### 3.2 Backend
 
@@ -76,10 +81,22 @@ python -m venv venv
 venv/Scripts/pip install -r requirements.txt -r requirements-dev.txt   # Windows
 # source venv/bin/activate && pip install -r ... on macOS/Linux
 
+gcloud auth application-default login
 cp .env.example .env          # then fill in the values in §3.3
-docker compose up -d db       # Postgres 16 + pgvector on :5432
-alembic upgrade head          # head is 9a1f4c2b7e35
-uvicorn app.main:app --reload --port 8000
+
+cd frontend && npm install && npm run build && cd ..
+uvicorn app.main:app --reload --port 8000      # serves the SPA too
+```
+
+`alembic upgrade head` (head is `9a1f4c2b7e35`) runs against **Cloud SQL** and
+is a deliberate step before deploying a revision that needs it — Cloud Run does
+not run migrations.
+
+The test database is separate and local:
+
+```bash
+docker compose up -d db       # Postgres 16 + pgvector on :5432, tests only
+ALEMBIC_DATABASE_URL=postgresql+psycopg://app:app_local_dev_password@localhost:5432/paper_companion   alembic upgrade head
 ```
 
 ### 3.3 `.env` values that matter
@@ -87,50 +104,62 @@ uvicorn app.main:app --reload --port 8000
 `.env` is **not** in git. These are the settings the origin machine ran with:
 
 ```ini
-APP_ENV=local
-DB_USER=app
-DB_PASSWORD=<anything>
-DB_NAME=paper_companion
-DB_HOST=localhost
-DB_PORT=5432
+FIREBASE_PROJECT_ID=research-companion-506013
 
-AUTH_DEV_BYPASS_SUBJECT=local-dev-user   # no Firebase needed locally
-FIREBASE_PROJECT_ID=                     # leave blank while bypassing
-GEMINI_API_KEY=                          # blank: we use Vertex, below
+CLOUD_SQL_INSTANCE=research-companion-506013:us-central1:paper-companion
+CLOUD_SQL_IP_TYPE=PUBLIC
+DB_USER=app
+DB_PASSWORD=<from Secret Manager: db-app-password>
+DB_NAME=paper_companion
+
+STORAGE_BUCKET=research-companion-506013-papers
+
 VERTEX_PROJECT=research-companion-506013
 VERTEX_LOCATION=global                   # NOT us-central1 — see below
+
+CLOUD_TASKS_QUEUE=ingestion
+CLOUD_TASKS_LOCATION=us-central1
+SERVICE_ACCOUNT_EMAIL=paper-companion@research-companion-506013.iam.gserviceaccount.com
+SERVICE_BASE_URL=https://paper-companion-929850602194.us-central1.run.app
+GCP_PROJECT=research-companion-506013
+
 RETRIEVAL_TOP_K=8
 RETRIEVAL_MIN_SIMILARITY=                # MUST stay blank, see §7.4
 ```
+
+Every one of those is required. `SERVICE_BASE_URL` stays the **deployed** URL
+even when you run on localhost: Cloud Tasks pushes ingestion there, and a queue
+cannot reach your laptop. A paper uploaded from a local run is therefore
+ingested by the deployed service.
 
 **`VERTEX_LOCATION` must be `global`.** Gemini 3.x returns 404 in
 `us-central1` on this project — only `gemini-2.5-flash` answers there, which
 would quietly drop the build below HK-1's "Flash-class 3.5+". The `global`
 endpoint serves `gemini-embedding-001` too, so one value covers both.
 
-Local auth is Application Default Credentials, not a key:
-`gcloud auth application-default login`. If `get_embedder()` returns
-`HashingEmbedder`, the credentials or `VERTEX_PROJECT` did not load and
-everything downstream is silently running on deterministic stubs.
+Auth is Application Default Credentials, not a key:
+`gcloud auth application-default login`.
 
-The dev bypass authenticates every request as `local-dev-user` with no token.
-It is honoured **only** when `APP_ENV=local`; set anywhere else the app returns
-503 rather than quietly accepting it.
+There is no auth bypass. Signing in with Firebase is the only way in, wherever
+the process runs. The failure mode this removed was worse than the
+inconvenience it cost: the application most people exercised day to day was
+unauthenticated, and the one that shipped was not.
 
 ### 3.4 Frontend
 
 ```bash
 cd frontend
 npm install
-npm run dev      # http://localhost:5173
+npm run build    # then open http://127.0.0.1:8000
 ```
 
-Vite proxies `/api` and `/health` to `127.0.0.1:8000`, so the browser stays
-same-origin and the backend needs **no CORS middleware**. Start the backend
-first.
+FastAPI serves the built bundle from the same origin as the API (`app/spa.py`),
+so there is one process and one port — the same arrangement the container uses.
+The browser never leaves that origin, so the backend needs **no CORS
+middleware** and the SSE stream is first-party.
 
-> **Gotcha:** Vite binds to `localhost`, which resolves to IPv6 `::1` on
-> Windows. `curl http://127.0.0.1:5173` returns nothing; use `localhost`.
+There is deliberately no dev-server proxy: it would recreate a development
+request path that differs from the deployed one. Rebuild to see changes.
 
 ### 3.5 Getting demo data into the new database
 
@@ -439,13 +468,13 @@ nothing ever wrote — would have served a stale token partway through a demo.
 the Firebase SDK into the client module breaks `npm run verify`, which loads it
 directly in Node.
 
-**Local development is unaffected.** The SPA probes `/api/me` on load: if it
-succeeds without a token the backend is in bypass mode and the login screen is
-skipped. One build, both environments, no flag to remember.
+> **Superseded by §5.6.** This section described a build that skipped the login
+> screen when the backend answered `/api/me` without a token. That probe and the
+> bypass behind it are gone: signing in is the only way in, everywhere.
 
 `scripts/seed_demo_account.py` gives the demo account its own papers, concepts
-and struggle. This is not optional — all the local demo data belongs to
-`local-dev-user`, so a judge would otherwise sign in to an empty library. It
+and struggle. This is not optional — a fresh Firebase account signs in to an
+empty library, with no cross-paper edge for the callback to fire on. It
 resolves the account's Firebase UID over ADC (the `users.auth_subject` must
 match, not the email), grants the papers, and runs **phase 6b only**: chunks
 are shared by content hash, so only the per-reader concepts are rebuilt.
@@ -457,7 +486,7 @@ are shared by content hash, so only the per-reader concepts are rebuilt.
 > reader it is given, preferring the known-good pair when it is there. Nothing
 > is fabricated: every candidate is an edge the adjudicator wrote at ingest.
 
-**Verified with the dev bypass off**, against a real Firebase sign-in: no token
+**Verified against a real Firebase sign-in**: no token
 → 401, garbage token → 401, demo token → 200 resolving to the right user, who
 sees 2 papers, 18 concepts, 26 graph edges and 2 weak concepts.
 
@@ -496,7 +525,7 @@ PYTHONPATH=. python scripts/preflight_deploy.py
 > `preflight_deploy.py` checks it, and `tests/test_deployment_guards.py` fails
 > the suite if it ever regresses. Its `--verify` hint also referenced
 > `VertexEmbedder`, a class that has never existed; it now uses
-> `get_embedder()` and says what a `HashingEmbedder` result means.
+> `get_embedder()`.
 
 **Cloud SQL is wired up** (`app/db/cloud_sql.py`). Set `CLOUD_SQL_INSTANCE` to
 `project:region:instance` and both engines switch onto the connector — the
@@ -515,7 +544,9 @@ one would surface as a failed turn rather than a reconnect.
 
 - Migrations do not run on boot, on purpose. `alembic upgrade head` is a
   deliberate step before the first deploy of a revision.
-- Background ingestion still uses FastAPI `BackgroundTasks`, not Cloud Tasks.
+- ~~Background ingestion still uses FastAPI `BackgroundTasks`~~ — resolved:
+  ingestion goes through Cloud Tasks and `POST /internal/ingest`, and the
+  in-process path has been removed rather than kept as a local option.
   The queue is provisioned; the push route is not written.
 - Firebase Auth is not configured, so the deployed app has no way to
   authenticate anyone until `FIREBASE_PROJECT_ID` is set and the SPA sends a
@@ -528,6 +559,63 @@ Free tier is `generate_content` **20/day per model** and `embed_content`
 100/minute. A single turn costs 2–4 `generate_content` requests. This is
 unworkable for demo rehearsal — the origin machine was rotating between model
 IDs to keep working. **Enable billing before the recording session.**
+
+---
+
+### 5.6 Production-only — the local mode is gone
+
+**Decided 2026-08-22.** The application had a second way to run: an auth
+bypass, a local Postgres, a filesystem storage backend, in-process ingestion,
+and hashing/heuristic stand-ins for every model call. All of it has been
+removed. There is one configuration, and `localhost` is an address rather than
+a mode.
+
+The reason is not tidiness. Every one of those fallbacks turned a broken
+configuration into a healthy-looking one — the service started, ingested
+papers, answered questions and returned verified citations with nothing real
+behind any of it. Two of them had already caused exactly that failure in this
+project: `hnsw.iterative_scan` was wrong on the first Cloud SQL instance while
+every local run looked fine, and an unconfigured embedder would silently build
+a corpus that can never be searched with real vectors.
+
+What changed:
+
+| Was | Now |
+| --- | --- |
+| `AUTH_DEV_BYPASS_SUBJECT`, `local-dev-user` | Firebase sign-in, everywhere |
+| `APP_ENV` deciding behaviour | removed entirely |
+| `DB_HOST`/`DB_PORT` local Postgres | Cloud SQL only, via the connector |
+| `LocalStorage` writing to `.storage/` | GCS only |
+| `BackgroundTasks` ingestion | Cloud Tasks only |
+| `HashingEmbedder`, `HeuristicAnalyzer`, `ConservativeAdjudicator`, quiz stubs | Vertex only; the fakes moved to `tests/fakes.py` |
+| `GEMINI_API_KEY` (AI Studio transport) | removed; Vertex over ADC |
+| Vite `/api` dev proxy | removed; FastAPI serves the SPA on one origin |
+
+Every setting the application needs is now **required**, so a misconfigured
+process fails at startup naming the missing one.
+
+Three things follow, and they are costs rather than side benefits:
+
+* **Uploads from a local run are ingested by the deployed service.** Cloud
+  Tasks pushes to `SERVICE_BASE_URL`; a queue cannot reach a laptop.
+* **Nothing runs without cloud credentials.** Local runs bill real Vertex calls
+  and write to the real database and bucket.
+* **The test suite is the only thing left with a local dependency**, and it is
+  confined to `tests/conftest.py`: Docker Postgres reached through
+  `TEST_DATABASE_URL`, with migrations applied via `ALEMBIC_DATABASE_URL`. The
+  application has no code path that would reach it.
+
+`tests/conftest.py` sets every required setting to an obviously fake value
+before importing the app, and environment variables outrank `.env` — so a test
+that escapes its fakes fails trying to reach `test-project` rather than quietly
+billing the real one. That is not theoretical: it caught two tests during this
+change that were holding the real factory captured at import time.
+
+Three regression guards pin the removals rather than trusting review:
+`test_there_is_no_authentication_bypass`, `test_there_is_no_stub_fallback_left_to_reach`,
+and `test_there_is_no_in_process_fallback`.
+
+**Revert point:** tag `pre-production-cleanup` (`dc46014`).
 
 ---
 

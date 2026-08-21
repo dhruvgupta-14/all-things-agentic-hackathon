@@ -92,29 +92,6 @@ class Adjudicator(Protocol):
         ...
 
 
-class ConservativeAdjudicator:
-    """Offline default: never merges.
-
-    A wrong merge silently corrupts the graph and is awkward to unpick; a
-    duplicate is untidy and mergeable later through `merged_into_id`. With no
-    model available, the safe answer is that two names are different concepts.
-    """
-
-    @property
-    def model_name(self) -> str:
-        return "conservative-no-merge"
-
-    def adjudicate_batch(self, pairs: list[ConceptPair]) -> list[Adjudication]:
-        return [
-            Adjudication(
-                verdict="distinct",
-                confidence=0.0,
-                reason="no adjudicator configured; defaulting to distinct",
-            )
-            for _ in pairs
-        ]
-
-
 _PROMPT = """You are deciding whether two technical concept names, taken from
 research papers one reader has read, refer to the same idea.
 
@@ -142,20 +119,16 @@ PAIRS
 
 
 class GeminiAdjudicator:
-    """Reachable via an AI Studio API key or Vertex AI — the same model."""
+    """The concept-identity judgment, on Vertex AI."""
 
     def __init__(
         self,
         *,
         model: str,
-        api_key: str | None = None,
-        project: str | None = None,
-        location: str | None = None,
+        project: str,
+        location: str,
     ) -> None:
-        if not api_key and not project:
-            raise ValueError("GeminiAdjudicator needs either an api_key or a project")
         self._model = model
-        self._api_key = api_key
         self._project = project
         self._location = location
         self._client = None
@@ -166,7 +139,7 @@ class GeminiAdjudicator:
 
     @property
     def transport(self) -> str:
-        return "vertex" if self._project else "ai-studio"
+        return "vertex"
 
     def _get_client(self):
         # Shared per process: building one costs a ~12s credential and TLS
@@ -175,7 +148,6 @@ class GeminiAdjudicator:
             from app.services.genai_client import get_genai_client
 
             self._client = get_genai_client(
-                api_key=self._api_key,
                 project=self._project,
                 location=self._location,
             )
@@ -235,16 +207,18 @@ class GeminiAdjudicator:
 
 
 def get_adjudicator() -> Adjudicator:
+    """The application's adjudicator. One backend, no branch.
+
+    The old fallback never merged anything, so an unconfigured deployment
+    canonicalized every concept into a duplicate — the cross-paper edges the
+    callback depends on were simply never written, silently.
+
+    Called through the module rather than imported by name, so the test
+    harness has one place to substitute a deterministic fake.
+    """
     settings = get_settings()
-    if settings.vertex_project:
-        return GeminiAdjudicator(
-            model=settings.gemini_model,
-            project=settings.vertex_project,
-            location=settings.vertex_location,
-        )
-    if settings.gemini_api_key:
-        return GeminiAdjudicator(
-            model=settings.gemini_model, api_key=settings.gemini_api_key
-        )
-    logger.debug("no adjudicator configured; canonicalization will never merge")
-    return ConservativeAdjudicator()
+    return GeminiAdjudicator(
+        model=settings.gemini_model,
+        project=settings.vertex_project,
+        location=settings.vertex_location,
+    )

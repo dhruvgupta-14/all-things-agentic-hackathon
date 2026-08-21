@@ -49,10 +49,13 @@ def check_vertex_location() -> None:
 
     settings = get_settings()
 
-    if not settings.vertex_project:
-        warn("VERTEX_PROJECT is unset", "deployment must not run on local stubs")
-    else:
+    # Required by Settings, so an unset one never gets this far — but an empty
+    # string passes `str` validation, and that would build a client pointed at
+    # nothing.
+    if settings.vertex_project:
         ok("VERTEX_PROJECT set", settings.vertex_project)
+    else:
+        fail("VERTEX_PROJECT is empty", "every model call would fail at run time")
 
     if settings.vertex_location == "global":
         ok("VERTEX_LOCATION is 'global'")
@@ -117,59 +120,21 @@ def check_runtime_config() -> None:
 
     settings = get_settings()
 
-    if settings.app_env == "local":
-        warn("APP_ENV is 'local'", "set to 'staging' or 'production' when deploying")
-    else:
-        ok("APP_ENV", settings.app_env)
+    ok("FIREBASE_PROJECT_ID", settings.firebase_project_id)
+    ok("CLOUD_SQL_INSTANCE", settings.cloud_sql_instance)
+    ok("STORAGE_BUCKET — GCS backend", settings.storage_bucket)
+    ok(
+        "Cloud Tasks",
+        f"{settings.cloud_tasks_queue} pushes to {settings.service_base_url}",
+    )
 
-    # The dev bypass is refused outside local, but shipping it set is still a
-    # loaded gun pointed at the next person who changes APP_ENV.
-    if settings.auth_dev_bypass_subject and settings.app_env != "local":
-        fail(
-            "AUTH_DEV_BYPASS_SUBJECT is set outside local",
-            "it is refused at runtime, but must not be in a deployed config",
-        )
-    elif settings.auth_dev_bypass_subject:
-        warn("AUTH_DEV_BYPASS_SUBJECT set", "must be blank in the deployed config")
-    else:
-        ok("AUTH_DEV_BYPASS_SUBJECT is blank")
-
-    if settings.app_env != "local" and not settings.firebase_project_id:
-        fail("FIREBASE_PROJECT_ID is unset", "/me and /papers return 503 without it")
-    elif settings.firebase_project_id:
-        ok("FIREBASE_PROJECT_ID set", settings.firebase_project_id)
-    else:
-        warn("FIREBASE_PROJECT_ID unset", "required once the dev bypass is off")
-
-    if settings.storage_bucket:
-        ok("STORAGE_BUCKET set — GCS backend", settings.storage_bucket)
-    elif settings.app_env == "local":
-        warn("STORAGE_BUCKET unset", "uploads go to a local directory")
-    else:
-        fail(
-            "STORAGE_BUCKET is unset",
-            "uploads would go to the container filesystem, which Cloud Run "
-            "discards on every restart",
-        )
-
-    if settings.uses_cloud_tasks:
-        ok(
-            "Cloud Tasks configured",
-            f"{settings.cloud_tasks_queue} → {settings.service_base_url}",
-        )
-    elif settings.app_env == "local":
-        ok("Cloud Tasks unset — ingestion runs in-process, correct locally")
-    else:
-        fail(
-            "Cloud Tasks is not configured",
-            "a deployed upload is refused with 503 rather than quietly run "
-            "in-process, which does not survive instance reclaim",
-        )
-
-    if settings.service_base_url and not settings.service_base_url.startswith("https://"):
+    # Every setting above is required, so reaching this line at all means the
+    # process is configured. What is worth checking is the value that is
+    # syntactically fine and operationally wrong.
+    if not settings.service_base_url.startswith("https://"):
         fail(
             "SERVICE_BASE_URL is not https",
-            "it is the OIDC audience; the token would never match",
+            "it is the OIDC audience; every ingestion push would 401",
         )
 
     if settings.retrieval_min_similarity is None:
@@ -202,24 +167,18 @@ def check_database() -> None:
     from app.config import get_settings
 
     settings = get_settings()
-    if settings.uses_cloud_sql:
-        ok("Cloud SQL connector configured", settings.cloud_sql_instance)
-        if settings.cloud_sql_instance.count(":") == 2:
-            ok("instance connection name looks right", "project:region:instance")
-        else:
-            fail(
-                "CLOUD_SQL_INSTANCE is not project:region:instance",
-                settings.cloud_sql_instance,
-            )
-        if settings.database_url == "postgresql+asyncpg://":
-            ok("no host in the DSN — the connector supplies it")
-        else:
-            fail("a host survived in the DSN", "it would dial somewhere else")
+    if settings.cloud_sql_instance.count(":") == 2:
+        ok("instance connection name looks right", "project:region:instance")
     else:
-        warn(
-            "CLOUD_SQL_INSTANCE unset",
-            "fine locally; set it to project:region:instance when deploying",
+        fail(
+            "CLOUD_SQL_INSTANCE is not project:region:instance",
+            settings.cloud_sql_instance,
         )
+
+    if settings.database_url == "postgresql+asyncpg://":
+        ok("no host in the DSN — the connector supplies it")
+    else:
+        fail("a host survived in the DSN", "it would dial somewhere else")
 
     print(
         "  [NOTE] Cloud SQL needs the `random_page_cost` database flag set to\n"
@@ -259,7 +218,7 @@ def main() -> int:
     if failures:
         print(f"{failures} blocking issue(s), {warnings} warning(s)")
         return 1
-    print(f"No blocking issues. {warnings} warning(s) — expected while APP_ENV=local.")
+    print(f"No blocking issues. {warnings} warning(s).")
     return 0
 
 

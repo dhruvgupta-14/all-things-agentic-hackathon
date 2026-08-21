@@ -38,32 +38,28 @@ SERVER_SETTINGS = {
 }
 
 def _build_engine():
-    """One engine, reaching the database whichever way this deployment does.
+    """One engine, one database: Cloud SQL through the Python connector.
 
-    `SERVER_SETTINGS` travels either way — those settings are the difference
-    between a correct query plan and a silently wrong one, and they must not
-    depend on how the connection was established.
+    There is no second branch here on purpose. A local-Postgres path meant the
+    application could be exercised at length against a database configured
+    differently from the one it would actually run on — which is exactly how
+    `hnsw.iterative_scan` came to be wrong on the first Cloud SQL instance
+    while every local run looked healthy.
     """
-    if settings.uses_cloud_sql:
-        from app.db.cloud_sql import async_creator
-
-        return create_async_engine(
-            settings.database_url,
-            echo=False,
-            # SERVER_SETTINGS goes *into the creator*, not `connect_args`:
-            # SQLAlchemy ignores `connect_args` once a creator is supplied, and
-            # the settings would be dropped without a word.
-            async_creator=async_creator(settings, SERVER_SETTINGS),
-            # Cloud SQL closes idle connections, and a pooled-but-dead one
-            # surfaces as a failed turn rather than a reconnect.
-            pool_pre_ping=True,
-            pool_recycle=1800,
-        )
+    from app.db.cloud_sql import async_creator
 
     return create_async_engine(
         settings.database_url,
         echo=False,
-        connect_args={"server_settings": SERVER_SETTINGS},
+        # SERVER_SETTINGS goes *into the creator*, not `connect_args`:
+        # SQLAlchemy ignores `connect_args` once a creator is supplied, and the
+        # settings would be dropped without a word. Those settings are the
+        # difference between a correct query plan and a silently empty result.
+        async_creator=async_creator(settings, SERVER_SETTINGS),
+        # Cloud SQL closes idle connections, and a pooled-but-dead one surfaces
+        # as a failed turn rather than a reconnect.
+        pool_pre_ping=True,
+        pool_recycle=1800,
     )
 
 

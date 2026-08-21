@@ -23,14 +23,10 @@ async def _warm_model_client() -> None:
     optimisation; refusing to start because it did not work would turn a slow
     first turn into an outage.
     """
-    settings = get_settings()
-    if not (settings.vertex_project or settings.gemini_api_key):
-        return  # local stubs build no client
-
     def _warm() -> None:
-        from app.services.embeddings import get_embedder
+        from app.services import embeddings
 
-        get_embedder().embed_query("warm up")
+        embeddings.get_embedder().embed_query("warm up")
 
     try:
         # In a thread: the client is synchronous, and blocking the event loop

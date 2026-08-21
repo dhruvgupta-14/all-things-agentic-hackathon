@@ -40,6 +40,34 @@ class Settings(BaseSettings):
     # PUBLIC unless the instance is on a VPC, in which case PRIVATE.
     cloud_sql_ip_type: str = "PUBLIC"
 
+    # Cloud Tasks — durable asynchronous ingestion (ARCHITECTURE 8).
+    #
+    # All three must be set for the queue to engage. Unset, ingestion runs
+    # in-process: correct locally, and silent data loss on Cloud Run, where an
+    # instance is reclaimed the moment the response is sent and takes the
+    # unfinished job with it. `dispatch_ingestion` refuses the in-process path
+    # outright when app_env is not "local", so that combination fails loudly
+    # rather than dropping papers.
+    cloud_tasks_queue: str | None = None
+    cloud_tasks_location: str = "us-central1"
+    # The identity the queue mints its OIDC token as, and the identity
+    # /internal/ingest requires. A push from anything else is refused.
+    service_account_email: str | None = None
+    # This service's own public https URL — the queue pushes back to it. Also
+    # the OIDC audience, which is why it is pinned rather than derived from the
+    # request: `Host` is client-controlled.
+    service_base_url: str | None = None
+    # The project holding the queue. Defaults to `vertex_project`, which is the
+    # same project in every deployment of this system; set it only if they ever
+    # diverge.
+    gcp_project: str | None = None
+
+    # The built SPA, served from this container at "/" when the directory
+    # exists. Relative paths resolve against the repository root, not the
+    # working directory. Point it somewhere empty to run the API alone —
+    # during development the frontend is on Vite's port and proxies here.
+    spa_dist_dir: str = "frontend/dist"
+
     # Object storage. Local development writes to a directory; deployment sets
     # storage_bucket and the GCS backend takes over.
     storage_bucket: str | None = None
@@ -102,6 +130,27 @@ class Settings(BaseSettings):
         ingest that concepts were silently skipped by the local stubs.
         """
         return bool(self.vertex_project or self.gemini_api_key)
+
+    @property
+    def project_id(self) -> str | None:
+        """The GCP project for Cloud Tasks."""
+        return self.gcp_project or self.vertex_project
+
+    @property
+    def uses_cloud_tasks(self) -> bool:
+        """Is durable ingestion configured?
+
+        Every part is required: a queue with no service URL has nowhere to push,
+        and a URL with no service account produces a token nothing will accept.
+        Treating a partial configuration as "on" would fail at the first upload
+        rather than at startup.
+        """
+        return bool(
+            self.cloud_tasks_queue
+            and self.service_account_email
+            and self.service_base_url
+            and self.project_id
+        )
 
     @property
     def uses_cloud_sql(self) -> bool:

@@ -167,20 +167,21 @@ async def test_missing_original_is_permanent_not_transient(
 
 @pytest.fixture
 def no_background(monkeypatch):
-    """Record enqueued jobs instead of running them.
+    """Record dispatched jobs instead of scheduling them.
 
-    The real job opens its own session and commits, which would escape the
-    per-test transaction. The pipeline itself is covered above.
+    Patched at the dispatch seam rather than at the job functions: the real
+    job opens its own session and commits, which would escape the per-test
+    transaction, and under a queue the router never calls the job directly at
+    all. The pipeline itself is covered above; `tests/test_task_dispatch.py`
+    covers which way dispatch sends it.
     """
     enqueued: list = []
-    monkeypatch.setattr(
-        "app.routers.papers.run_ingestion_job",
-        lambda paper_id, user_id=None: enqueued.append(("ingest", paper_id)),
-    )
-    monkeypatch.setattr(
-        "app.routers.papers.run_canonicalization_job",
-        lambda paper_id, user_id: enqueued.append(("canonicalize", paper_id)),
-    )
+
+    async def fake_dispatch(job, paper_id, user_id, *, background_tasks):
+        enqueued.append((job, paper_id))
+        return "in-process"
+
+    monkeypatch.setattr("app.routers.papers.dispatch", fake_dispatch)
     return enqueued
 
 

@@ -18,8 +18,12 @@ __pycache__
 .ruff_cache
 .mypy_cache
 
-# The SPA is deployed separately as a static bundle.
-frontend
+# The SPA *is* built into this image (see Dockerfile), so the sources have to
+# reach the build context. Only these two are excluded: node_modules is
+# installed inside the node stage from the lockfile, and dist is rebuilt there
+# — copying either in would ship a stale or host-specific bundle.
+frontend/node_modules
+frontend/dist
 
 # Tests and their fixtures are not needed at runtime, and the demo PDFs are
 # ~2MB of image for no reason — they are re-ingested from the repo, not from

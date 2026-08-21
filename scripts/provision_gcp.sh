@@ -363,16 +363,24 @@ VERTEX_PROJECT=$PROJECT
 # serves gemini-embedding-001 too, so one value covers both.
 VERTEX_LOCATION=global
 
-# Retune against real embeddings before trusting it — the local default of
-# 0.25 was calibrated on the hashing stub and does not transfer.
-RETRIEVAL_MIN_SIMILARITY=0.25
+# Deliberately blank. Cosine scores are not comparable between embedding
+# models, so each embedder carries the floor for its own vector space (0.25 for
+# the lexical stub, 0.58 for gemini-embedding-001). Setting one value here
+# overrides both, and the 0.25 calibrated on the hashing stub does not transfer.
+RETRIEVAL_MIN_SIMILARITY=
 
-# Reserved. The queue below is created and ready, but the application still
-# dispatches ingestion via FastAPI BackgroundTasks; these are read only once
-# the Cloud Tasks push route exists.
-#   CLOUD_TASKS_QUEUE=$QUEUE
-#   CLOUD_TASKS_LOCATION=$REGION
-#   SERVICE_ACCOUNT_EMAIL=$SA_EMAIL
+# Durable ingestion. All three are required together: without them a deployed
+# service refuses uploads with 503 rather than running the job in-process,
+# which would not survive Cloud Run reclaiming the instance.
+CLOUD_TASKS_QUEUE=$QUEUE
+CLOUD_TASKS_LOCATION=$REGION
+SERVICE_ACCOUNT_EMAIL=$SA_EMAIL
+
+# This service's own https URL. Cloud Tasks pushes back to it, and it is the
+# OIDC audience /internal/ingest checks against, so it must match exactly.
+# Cloud Run URLs are deterministic — service name, project number, region — so
+# this can be set before the first deploy.
+SERVICE_BASE_URL=https://<service>-<project-number>.$REGION.run.app
 
 ENV
 

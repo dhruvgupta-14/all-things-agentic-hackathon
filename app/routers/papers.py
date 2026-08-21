@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import uuid
 
 from fastapi import (
@@ -20,7 +21,9 @@ from app.db.models import Paper, UserPaperAccess
 from app.ingestion.parser import PdfCorruptError, PdfEncryptedError, probe_page_count
 from app.services.embeddings import get_embedder
 from app.services.storage import get_storage
-from app.services.tasks import run_canonicalization_job, run_ingestion_job
+from app.services.tasks import TaskDispatchError, dispatch
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/papers", tags=["papers"])
 
@@ -173,9 +176,22 @@ async def upload_paper(
         # phase 6b still has to run, because concepts are per-reader.
         await _grant_access(session, principal.user_id, existing.paper_id, file.filename)
         await session.commit()
-        background_tasks.add_task(
-            run_canonicalization_job, existing.paper_id, principal.user_id
-        )
+        try:
+            await dispatch(
+                "canonicalize",
+                existing.paper_id,
+                principal.user_id,
+                background_tasks=background_tasks,
+            )
+        except TaskDispatchError:
+            # Not fatal, unlike the ingest branch below: the paper is already
+            # parsed and fully searchable, and what is lost is the reader's
+            # concept edges. Refusing the upload over that would deny access to
+            # a paper that is sitting right there, ready.
+            logger.error(
+                "canonicalization not scheduled",
+                extra={"paper_id": str(existing.paper_id)},
+            )
         return _serialize(existing)
 
     storage = get_storage()
@@ -194,7 +210,25 @@ async def upload_paper(
     await _grant_access(session, principal.user_id, paper.paper_id, file.filename)
     await session.commit()
 
-    background_tasks.add_task(run_ingestion_job, paper.paper_id, principal.user_id)
+    try:
+        await dispatch(
+            "ingest", paper.paper_id, principal.user_id, background_tasks=background_tasks
+        )
+    except TaskDispatchError:
+        # The paper row is already committed, so doing nothing here would leave
+        # it `queued` forever — the exact silent stall this dispatch path was
+        # built to remove. Record a terminal state the user can actually see,
+        # and tell them the upload did not take.
+        paper.processing_status = "failed"
+        paper.processing_phase = None
+        paper.error_code = "enqueue_failed"
+        await session.commit()
+        logger.error("ingestion not scheduled", extra={"paper_id": str(paper.paper_id)})
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not schedule processing. Please try again.",
+        ) from None
+
     return _serialize(paper)
 
 

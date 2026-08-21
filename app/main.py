@@ -5,7 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.config import get_settings
-from app.routers import feedback, health, me, memory, papers, sessions
+from app.routers import feedback, health, internal, me, memory, papers, sessions
+from app.spa import mount_spa, spa_dist
 
 logger = logging.getLogger(__name__)
 
@@ -58,3 +59,10 @@ app.include_router(memory.router)
 app.include_router(memory.turns_router)
 app.include_router(feedback.router)
 app.include_router(feedback.debug_router)
+# Not part of the browser API: Cloud Tasks pushes here with an OIDC token.
+app.include_router(internal.router)
+
+# Last, and deliberately so: this mounts at "/", and Starlette matches routes
+# in registration order. Registered any earlier it would swallow the API — an
+# unknown /api path would come back as index.html instead of a JSON 404.
+mount_spa(app, spa_dist(get_settings().spa_dist_dir))

@@ -57,10 +57,28 @@ def test_the_container_honours_cloud_runs_port():
 
 
 def test_the_build_context_excludes_secrets_and_local_state():
-    ignore = (REPO / ".dockerignore").read_text(encoding="utf-8")
+    ignore = (REPO / ".dockerignore").read_text(encoding="utf-8").splitlines()
 
-    for entry in (".env", "venv", ".pgdata", "frontend"):
+    for entry in (".env", "venv", ".pgdata", "frontend/node_modules"):
         assert entry in ignore, f"{entry} would be baked into a pushed image"
+
+    # A bare `frontend` line is what this used to say, and it would now break
+    # the build rather than tighten it: the SPA sources have to reach the build
+    # context for the node stage to compile them.
+    assert "frontend" not in ignore
+
+
+def test_the_image_builds_the_spa_and_ships_only_its_output():
+    """The frontend calls the API on relative paths, so it has to be served
+    from the same origin. Shipping the API alone produces a deployment where
+    the page loads and every request 404s against the static host."""
+    dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "npm ci" in dockerfile, "npm install would ignore the lockfile"
+    assert "npm run build" in dockerfile
+    # From the node stage, and only `dist`: node_modules must not reach the
+    # registry, and the built bundle must land where SPA_DIST_DIR points.
+    assert "COPY --from=spa /spa/dist ./frontend/dist" in dockerfile
 
 
 @pytest.mark.parametrize(

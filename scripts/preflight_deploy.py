@@ -143,8 +143,34 @@ def check_runtime_config() -> None:
 
     if settings.storage_bucket:
         ok("STORAGE_BUCKET set — GCS backend", settings.storage_bucket)
+    elif settings.app_env == "local":
+        warn("STORAGE_BUCKET unset", "uploads go to a local directory")
     else:
-        warn("STORAGE_BUCKET unset", "uploads would go to the container filesystem")
+        fail(
+            "STORAGE_BUCKET is unset",
+            "uploads would go to the container filesystem, which Cloud Run "
+            "discards on every restart",
+        )
+
+    if settings.uses_cloud_tasks:
+        ok(
+            "Cloud Tasks configured",
+            f"{settings.cloud_tasks_queue} → {settings.service_base_url}",
+        )
+    elif settings.app_env == "local":
+        ok("Cloud Tasks unset — ingestion runs in-process, correct locally")
+    else:
+        fail(
+            "Cloud Tasks is not configured",
+            "a deployed upload is refused with 503 rather than quietly run "
+            "in-process, which does not survive instance reclaim",
+        )
+
+    if settings.service_base_url and not settings.service_base_url.startswith("https://"):
+        fail(
+            "SERVICE_BASE_URL is not https",
+            "it is the OIDC audience; the token would never match",
+        )
 
     if settings.retrieval_min_similarity is None:
         ok("RETRIEVAL_MIN_SIMILARITY is unset, as it must be")

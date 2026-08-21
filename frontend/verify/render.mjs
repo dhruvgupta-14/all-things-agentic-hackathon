@@ -31,10 +31,41 @@ try {
   const { Conversation } = await server.ssrLoadModule('/src/components/Conversation.jsx')
 
   console.log('\n== app shell ==')
-  const shell = renderToStaticMarkup(React.createElement(App))
-  check('App renders', shell.length > 0)
+  const { Workspace } = await server.ssrLoadModule('/src/App.jsx')
+  const { SignIn } = await server.ssrLoadModule('/src/components/SignIn.jsx')
+
+  // `App` gates on auth before anything else, and effects do not run under
+  // SSR, so it renders the resolving state — which is the correct behaviour
+  // and is what stops a returning reader seeing the login form flash.
+  const gate = renderToStaticMarkup(React.createElement(App))
+  check('App renders', gate.length > 0)
+  check('it resolves the session before showing anything', gate.includes('Signing you in'))
+
+  const login = renderToStaticMarkup(
+    React.createElement(SignIn, { onSignIn: () => {}, error: null }),
+  )
+  check('the sign-in screen renders', login.includes('Sign in'))
+  check('it takes an email and a password', login.includes('type="password"'))
+  check(
+    'an error is announced to assistive tech',
+    renderToStaticMarkup(
+      React.createElement(SignIn, { onSignIn: () => {}, error: 'Nope.' }),
+    ).includes('role="alert"'),
+  )
+
+  const shell = renderToStaticMarkup(React.createElement(Workspace, {}))
   check('the rail is present', shell.includes('Reading Companion'))
   check('the empty state is shown with no session', shell.includes('Drop a PDF'))
+  check(
+    'sign-out is hidden when there is no session to end',
+    !shell.includes('Sign out'),
+  )
+  check(
+    'sign-out appears once signed in',
+    renderToStaticMarkup(
+      React.createElement(Workspace, { onSignOut: () => {}, user: { email: 'a@b.c' } }),
+    ).includes('Sign out'),
+  )
 
   console.log('\n== answer, with the real turn text ==')
   const text =

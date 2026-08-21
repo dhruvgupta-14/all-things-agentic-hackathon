@@ -43,7 +43,7 @@ function parseFrame(frame) {
 export async function* streamTurn({ sessionId, message, signal }) {
   const response = await fetch(`/api/sessions/${sessionId}/turns`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify({ message }),
     signal,
   })

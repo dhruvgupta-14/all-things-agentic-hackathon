@@ -16,10 +16,32 @@ export class ApiError extends Error {
   }
 }
 
-function authHeaders() {
-  // Absent in local development, where the backend's dev bypass authenticates
-  // the request. Present once Firebase is wired in.
-  const token = localStorage.getItem('authToken')
+/**
+ * Where a bearer token comes from.
+ *
+ * Injected rather than imported so this module stays free of the identity
+ * provider: the offline verification harnesses load it directly in Node, and
+ * pulling the Firebase SDK in here would make the transport untestable without
+ * a browser. `main.jsx` supplies the real provider at startup.
+ *
+ * The default returns nothing, which is exactly right for local development —
+ * the backend's dev bypass authenticates requests that carry no header.
+ */
+let tokenProvider = async () => null
+
+export function setTokenProvider(provider) {
+  tokenProvider = provider ?? (async () => null)
+}
+
+/**
+ * The bearer header for one request.
+ *
+ * Asked for per request rather than read from storage: Firebase rotates ID
+ * tokens roughly hourly and refreshes them transparently, so a cached string
+ * goes stale inside a single sitting.
+ */
+async function authHeaders() {
+  const token = await tokenProvider()
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
@@ -30,7 +52,7 @@ async function request(path, options = {}) {
       ...(options.body instanceof FormData
         ? {}
         : { 'Content-Type': 'application/json' }),
-      ...authHeaders(),
+      ...(await authHeaders()),
       ...(options.headers || {}),
     },
   })

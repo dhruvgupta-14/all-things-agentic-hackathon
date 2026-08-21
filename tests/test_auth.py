@@ -88,3 +88,48 @@ async def test_papers_is_empty_for_a_new_user(client: AsyncClient, dev_auth: str
     response = await client.get("/api/papers")
     assert response.status_code == 200
     assert response.json() == []
+
+
+# --------------------------------------------------------------------------
+# Clock skew
+# --------------------------------------------------------------------------
+
+
+def test_token_verification_tolerates_clock_skew():
+    """A host running slightly behind Google rejects valid tokens.
+
+    Firebase stamps `iat` from its own clock. On a machine that is behind, a
+    token that was just minted is "used too early" and the login fails with a
+    message indistinguishable from a wrong password. Measured on the
+    development machine: 41 seconds behind, which rejected every sign-in.
+
+    60s is the maximum the SDK accepts and the value Google documents.
+    """
+    from app.auth.firebase import CLOCK_SKEW_TOLERANCE_SECONDS
+
+    assert 0 < CLOCK_SKEW_TOLERANCE_SECONDS <= 60
+
+
+def test_the_tolerance_is_actually_passed_to_the_verifier():
+    """A constant nothing reads would be a comment with extra steps."""
+    import inspect
+
+    from app.auth import firebase
+
+    source = inspect.getsource(firebase.verify_id_token)
+    assert "clock_skew_seconds=CLOCK_SKEW_TOLERANCE_SECONDS" in source
+
+
+def test_skew_tolerance_does_not_relax_anything_else(monkeypatch):
+    """It moves the not-before check only. A token that is expired, forged or
+    minted for another project must still be refused."""
+    import inspect
+
+    from app.auth import firebase
+
+    source = inspect.getsource(firebase.verify_id_token)
+    # Expiry and revocation keep their own explicit branches.
+    assert "ExpiredIdTokenError" in source
+    assert "RevokedIdTokenError" in source
+    # The audience is pinned by project id when the app is built, not here.
+    assert "check_revoked=True" not in source

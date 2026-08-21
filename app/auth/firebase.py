@@ -20,6 +20,19 @@ logger = logging.getLogger(__name__)
 _app: firebase_admin.App | None = None
 _lock = threading.Lock()
 
+# Tolerance for the gap between this machine's clock and Google's.
+#
+# Without it, a host running even slightly behind rejects perfectly valid
+# tokens as "used too early" — the token's `iat` is in that host's future.
+# Measured on the development machine: 41 seconds behind, which rejected every
+# login with a message that reads like a bad password.
+#
+# 60s is the maximum the Firebase SDK accepts and the value Google documents.
+# It relaxes only the not-before check: the signature, the audience, the issuer
+# and the expiry are all still enforced exactly as before, so a token that is
+# forged, foreign or stale is refused whatever the clock says.
+CLOCK_SKEW_TOLERANCE_SECONDS = 60
+
 
 class AuthConfigurationError(RuntimeError):
     """The deployment cannot verify tokens at all. Not the caller's fault."""
@@ -83,7 +96,9 @@ def verify_id_token(raw_token: str) -> VerifiedToken:
     app = _get_app()
 
     try:
-        claims = firebase_auth.verify_id_token(raw_token, app=app)
+        claims = firebase_auth.verify_id_token(
+            raw_token, app=app, clock_skew_seconds=CLOCK_SKEW_TOLERANCE_SECONDS
+        )
     except firebase_auth.ExpiredIdTokenError as exc:
         raise InvalidTokenError("Token has expired.") from exc
     except firebase_auth.RevokedIdTokenError as exc:

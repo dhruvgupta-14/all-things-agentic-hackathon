@@ -6,6 +6,8 @@ import { Composer } from './components/Composer'
 import { Conversation } from './components/Conversation'
 import { MemoryPanel } from './components/MemoryPanel'
 import { Rail } from './components/Rail'
+import { AuthLoading, SignIn } from './components/SignIn'
+import { useAuth } from './hooks/useAuth'
 import { useConversation } from './hooks/useConversation'
 import { usePapers } from './hooks/usePapers'
 import { useSessions } from './hooks/useSessions'
@@ -19,17 +21,59 @@ const SUGGESTIONS = [
 
 export default function App() {
   const { theme, toggle } = useTheme()
+  const { user, ready, error: authError, signIn, signOut } = useAuth()
+
+  // Whether this backend wants a token at all. Local development runs with the
+  // dev bypass, where `/api/me` succeeds with no Authorization header — so the
+  // app asks rather than assuming, and the same build works in both places.
+  const [authMode, setAuthMode] = useState('checking')
+
+  useEffect(() => {
+    if (!ready) return
+    let cancelled = false
+
+    // Signed in already: nothing to probe.
+    if (user) {
+      api.me().catch(() => {})
+      setAuthMode('signed-in')
+      return undefined
+    }
+
+    api
+      .me()
+      .then(() => {
+        // No token, and the server still knows who we are.
+        if (!cancelled) setAuthMode('bypass')
+      })
+      .catch(() => {
+        if (!cancelled) setAuthMode('required')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [ready, user])
+
+  if (!ready || authMode === 'checking') return <AuthLoading />
+  if (authMode === 'required') return <SignIn onSignIn={signIn} error={authError} />
+
+  return (
+    <Workspace
+      theme={theme}
+      onToggleTheme={toggle}
+      user={user}
+      onSignOut={authMode === 'signed-in' ? signOut : null}
+    />
+  )
+}
+
+export function Workspace({ theme, onToggleTheme, user, onSignOut }) {
   const { papers, upload } = usePapers()
   const { sessions, refresh: refreshSessions, create } = useSessions()
 
   const [sessionId, setSessionId] = useState(null)
   const [open, setOpen] = useState(null)
   const [memoryOpen, setMemoryOpen] = useState(false)
-
-  // Identity is established once; it also provisions the user row on first run.
-  useEffect(() => {
-    api.me().catch(() => {})
-  }, [])
 
   const { messages, loading, streaming, send } = useConversation(sessionId, {
     onTurnComplete: refreshSessions,
@@ -88,7 +132,7 @@ export default function App() {
         onNewSession={startBlankSession}
         onUpload={upload}
         theme={theme}
-        onToggleTheme={toggle}
+        onToggleTheme={onToggleTheme}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
@@ -123,6 +167,18 @@ export default function App() {
           >
             What I remember
           </button>
+
+          {/* Absent in local development, where there is no session to end. */}
+          {onSignOut && (
+            <button
+              type="button"
+              onClick={onSignOut}
+              title={user?.email ?? undefined}
+              className="shrink-0 rounded px-2 py-1 text-[12px] text-muted transition-colors hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              Sign out
+            </button>
+          )}
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto">

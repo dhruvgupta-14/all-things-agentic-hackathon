@@ -33,7 +33,7 @@ import sys
 from sqlalchemy import func, select, text
 
 from app.db.base import async_session_factory
-from app.db.models import Concept, Paper, Turn, User
+from app.db.models import Concept, ConceptRelationship, Paper, Turn, User
 from app.services.callbacks import SUPPRESSED_RATE_LIMITED, CallbackService
 from app.services.learner_state import recompute
 from app.services.memory import MemoryService
@@ -135,6 +135,84 @@ async def reset() -> int:
         await session.commit()
         print(f"cleared observations for {STRUGGLED_WITH!r}")
         return 0
+
+
+async def choose_callback_pair(session, user):
+    """Find a concept pair this reader can actually be called back across.
+
+    Relationship typing is a model judgment, so which edges exist varies from
+    one canonicalization to the next. `STRUGGLED_WITH`/`ASKED_ABOUT` name the
+    pair that came out for the original demo user, and it is preferred when it
+    is there — but a hardcoded pair turns an ordinary variation in the graph
+    into a broken demo, which is what happened for the published demo account.
+
+    Returns `(struggled_with, asked_about, relationship_type)`, or None when
+    the reader's graph genuinely spans no two papers.
+
+    Nothing is fabricated here: every candidate is an edge the adjudicator
+    actually wrote at ingest, between two concepts from two different papers.
+    """
+    concepts = {
+        concept.concept_id: concept
+        for concept in (
+            await session.scalars(
+                select(Concept).where(
+                    Concept.user_id == user.user_id,
+                    Concept.merged_into_id.is_(None),
+                )
+            )
+        ).all()
+    }
+    edges = (
+        await session.scalars(
+            select(ConceptRelationship).where(
+                ConceptRelationship.user_id == user.user_id
+            )
+        )
+    ).all()
+
+    candidates = []
+    for edge in edges:
+        for near, far in (
+            (edge.source_concept_id, edge.target_concept_id),
+            (edge.target_concept_id, edge.source_concept_id),
+        ):
+            struggled = concepts.get(near)
+            asked = concepts.get(far)
+            if struggled is None or asked is None:
+                continue
+
+            # The callback has to reach a paper the active one is not.
+            active = set(asked.source_paper_ids or [])
+            elsewhere = set(struggled.source_paper_ids or []) - active
+            if not active or not elsewhere:
+                continue
+
+            preferred = (
+                struggled.canonical_name == STRUGGLED_WITH
+                and asked.canonical_name == ASKED_ABOUT
+            )
+            candidates.append(
+                (
+                    preferred,
+                    struggled.evidence_count or 0,
+                    edge.confidence,
+                    str(struggled.concept_id),
+                    struggled,
+                    asked,
+                    edge.relationship_type,
+                )
+            )
+
+    if not candidates:
+        return None
+
+    # Preferred pair first, then whichever concept already carries evidence —
+    # so a second run picks the same pair it seeded — then edge confidence.
+    # The id breaks ties so the choice is reproducible.
+    candidates.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3]))
+    _, _, _, _, struggled, asked, relationship = candidates[0]
+    return struggled, asked, relationship
 
 
 async def _turns_until_allowed(session, user) -> int:

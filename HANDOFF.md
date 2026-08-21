@@ -37,7 +37,7 @@ Everything below was verified on 2026-08-20.
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Backend tests | `pytest` | **387 passed** |
+| Backend tests | `pytest` | **390 passed** |
 | Lint | `ruff check .` | clean |
 | Migration drift | `alembic check` | no drift |
 | Frontend build | `npm run build` | clean |
@@ -417,6 +417,58 @@ instruction fragment on the *next* turn, and `apply_pending()` stamps
 nothing — a single not-helpful is evidence, not a mandate to retune how
 someone is taught, and `applied` reports that honestly rather than flattering.
 
+### 5.3c Firebase authentication — built and proven end to end
+
+**Decided:** email/password with one published demo account,
+`judge@research-companion.demo`. Google sign-in was rejected because each judge
+would land as a brand-new user with an empty library, and the cross-paper
+callback would not be demonstrable.
+
+Frontend: `lib/firebase.js`, `hooks/useAuth.js`, `components/SignIn.jsx`. The
+`apiKey` is committed deliberately — it is a public project identifier, not a
+credential, and hiding it would only make deploys harder.
+
+Two implementation notes worth not rediscovering:
+
+**The token is fetched per request, never cached.** Firebase rotates ID tokens
+roughly hourly. The old `localStorage.getItem('authToken')` placeholder — which
+nothing ever wrote — would have served a stale token partway through a demo.
+
+**Identity is injected into the transport, not imported by it.**
+`api/client.js` exposes `setTokenProvider()`, wired once in `main.jsx`. Pulling
+the Firebase SDK into the client module breaks `npm run verify`, which loads it
+directly in Node.
+
+**Local development is unaffected.** The SPA probes `/api/me` on load: if it
+succeeds without a token the backend is in bypass mode and the login screen is
+skipped. One build, both environments, no flag to remember.
+
+`scripts/seed_demo_account.py` gives the demo account its own papers, concepts
+and struggle. This is not optional — all the local demo data belongs to
+`local-dev-user`, so a judge would otherwise sign in to an empty library. It
+resolves the account's Firebase UID over ADC (the `users.auth_subject` must
+match, not the email), grants the papers, and runs **phase 6b only**: chunks
+are shared by content hash, so only the per-reader concepts are rebuilt.
+
+> **The callback pair is discovered, not named.** Relationship typing is a
+> model judgment, so which edges exist varies per canonicalization — the pair
+> hardcoded in `verify_callback.py` simply did not exist for the demo account.
+> `choose_callback_pair()` now finds a real cross-paper edge for whichever
+> reader it is given, preferring the known-good pair when it is there. Nothing
+> is fabricated: every candidate is an edge the adjudicator wrote at ingest.
+
+**Verified with the dev bypass off**, against a real Firebase sign-in: no token
+→ 401, garbage token → 401, demo token → 200 resolving to the right user, who
+sees 2 papers, 18 concepts, 26 graph edges and 2 weak concepts.
+
+> **⏰ Clock skew rejected every valid login.** Firebase stamps `iat` from its
+> own clock; this machine was 41 seconds behind, so freshly minted tokens were
+> "used too early" and failed with a message indistinguishable from a wrong
+> password. `CLOCK_SKEW_TOLERANCE_SECONDS = 60` (the SDK maximum, and what
+> Google documents) fixes it. It relaxes the not-before check only — signature,
+> audience, issuer and expiry are all still enforced. Worth knowing the host
+> clock can do this; the symptom looks nothing like the cause.
+
 ### 5.4 Deployment — prepared, not deployed
 
 Everything that can be done without spending money or creating resources is
@@ -651,7 +703,7 @@ Run all of these after any change. This is the established gate.
 
 ```bash
 # Backend
-pytest                        # expect 387 passed
+pytest                        # expect 390 passed
 ruff check .
 alembic check                 # expect: No new upgrade operations detected
 
@@ -708,8 +760,6 @@ recording.
 1. **Deploy.** `preflight_deploy.py` first, then `provision_gcp.sh`, then
    `alembic upgrade head` against Cloud SQL, then `gcloud run deploy`. Grant
    `roles/run.invoker` afterwards or Cloud Tasks pushes will 403.
-2. **Firebase Auth**, and decide the judge access method (§20 decision 4 — the
-   default is a shared demo account with published credentials).
 3. **Rehearse the demo.** Run `verify_callback.py` first: the cross-paper
    callback cannot fire on a fresh database and that is correct. Budget for
    429s — one retry is built in now, but sustained rate limiting still fails

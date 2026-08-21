@@ -1,0 +1,42 @@
+# What `gcloud run deploy --source .` uploads to Cloud Build.
+#
+# This file exists so that is a deliberate list rather than an inference: with
+# no .gcloudignore, gcloud falls back to .gitignore, which does not mention
+# frontend/node_modules — tens of thousands of files that would be uploaded on
+# every deploy and then discarded by the Docker build anyway.
+#
+# Two filters apply in sequence: this one decides what reaches Cloud Build, and
+# .dockerignore then decides what reaches the image. Anything the Dockerfile
+# needs must survive both.
+
+.git
+.gitignore
+
+# Secrets and local state. .env would otherwise be uploaded to a build service
+# and end up in build logs.
+.env
+.env.*
+!.env.example
+.pgdata
+.storage
+venv
+.venv
+
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+htmlcov
+.coverage
+
+# Installed inside the node stage from the lockfile, and rebuilt there.
+frontend/node_modules
+frontend/dist
+
+# Editors
+.vscode
+.idea
+*.swp
+.DS_Store

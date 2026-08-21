@@ -50,8 +50,10 @@ def _build_engine():
         return create_async_engine(
             settings.database_url,
             echo=False,
-            async_creator=async_creator(settings),
-            connect_args={"server_settings": SERVER_SETTINGS},
+            # SERVER_SETTINGS goes *into the creator*, not `connect_args`:
+            # SQLAlchemy ignores `connect_args` once a creator is supplied, and
+            # the settings would be dropped without a word.
+            async_creator=async_creator(settings, SERVER_SETTINGS),
             # Cloud SQL closes idle connections, and a pooled-but-dead one
             # surfaces as a failed turn rather than a reconnect.
             pool_pre_ping=True,

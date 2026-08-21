@@ -130,9 +130,16 @@ class Settings(BaseSettings):
 
     @property
     def sync_database_url(self) -> str:
-        """Alembic runs its migrations synchronously, over psycopg."""
+        """Alembic runs its migrations synchronously.
+
+        psycopg locally, **pg8000 over the Cloud SQL connector**. The
+        connector's psycopg driver talks over a unix domain socket, which
+        Windows does not have — so migrating a cloud instance from a Windows
+        laptop fails with `NotImplementedError` before it reaches the database.
+        pg8000 uses TCP and works on every platform the team runs.
+        """
         if self.uses_cloud_sql:
-            return "postgresql+psycopg://"
+            return "postgresql+pg8000://"
         return (
             f"postgresql+psycopg://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"

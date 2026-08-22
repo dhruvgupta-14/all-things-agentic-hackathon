@@ -1,17 +1,6 @@
 import { useState } from 'react'
 
-import { useConcept, useGraph, useMemory } from '../hooks/useMemory'
-import { ConceptGraph } from './ConceptGraph'
-
-/** Owns the fetch so `ConceptGraph` stays presentational and testable. */
-function GraphTab() {
-  const { graph, loading } = useGraph(true)
-  return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <ConceptGraph graph={graph} loading={loading} />
-    </div>
-  )
-}
+import { useConcept, useMemory } from '../hooks/useMemory'
 
 /**
  * What the system believes about the reader, and why.
@@ -23,6 +12,10 @@ function GraphTab() {
  *
  * Amber is reserved for citations everywhere in this app, so nothing here
  * uses it: understanding is shown on the accent, and weakness in `warn`.
+ *
+ * The concept graph is deliberately not drawn here. Its edges are still built
+ * at ingest and still drive the cross-paper callback, the memory prefetch and
+ * quiz sequencing — see app/services/callbacks.py — they are simply not shown.
  */
 
 function scoreLabel(concept, weakBelow) {
@@ -68,7 +61,6 @@ function Confidence({ value, floor }) {
 export function MemoryPanel({ open, onClose, onOpenTurn }) {
   const { concepts, thresholds, loading, refresh } = useMemory()
   const [selectedId, setSelectedId] = useState(null)
-  const [tab, setTab] = useState('concepts')
 
   if (!open) return null
 
@@ -92,38 +84,7 @@ export function MemoryPanel({ open, onClose, onOpenTurn }) {
         </button>
       </header>
 
-      <div
-        role="tablist"
-        aria-label="Learner memory views"
-        className="flex shrink-0 gap-1 border-b border-line px-3 py-2"
-      >
-        {[
-          ['concepts', 'Concepts'],
-          ['graph', 'Graph'],
-        ].map(([value, label]) => (
-          <button
-            key={value}
-            type="button"
-            role="tab"
-            aria-selected={tab === value}
-            onClick={() => setTab(value)}
-            className={`rounded px-2.5 py-1 text-[12px] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent ${
-              tab === value
-                ? 'bg-accent-soft text-accent-ink'
-                : 'text-muted hover:text-ink'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'graph' && <GraphTab />}
-
-      <div
-        className="min-h-0 flex-1 overflow-y-auto"
-        hidden={tab !== 'concepts'}
-      >
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {loading && (
           <p className="px-5 py-4 text-[12px] text-faint">Reading memory…</p>
         )}

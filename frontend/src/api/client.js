@@ -112,7 +112,6 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ understanding_score: understandingScore, note }),
     }),
-  getGraph: () => request('/api/memory/graph'),
 }
 
 export { authHeaders }

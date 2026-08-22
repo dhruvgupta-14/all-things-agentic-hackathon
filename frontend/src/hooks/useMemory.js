@@ -75,28 +75,3 @@ export function useConcept(conceptId) {
 
   return { concept, loading, correct, reload: load }
 }
-
-export function useGraph(enabled) {
-  const [graph, setGraph] = useState({ nodes: [], edges: [] })
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    if (!enabled) return
-    let cancelled = false
-    setLoading(true)
-    api
-      .getGraph()
-      .then((body) => {
-        if (!cancelled) setGraph(body)
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [enabled])
-
-  return { graph, loading }
-}

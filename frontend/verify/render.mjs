@@ -129,7 +129,6 @@ try {
 
   console.log('\n== learner memory ==')
   const { MemoryPanel } = await server.ssrLoadModule('/src/components/MemoryPanel.jsx')
-  const { ConceptGraph } = await server.ssrLoadModule('/src/components/ConceptGraph.jsx')
 
   // Closed is the common case and must cost nothing.
   check(
@@ -139,36 +138,13 @@ try {
 
   const panel = renderToStaticMarkup(React.createElement(MemoryPanel, { open: true }))
   check('the panel renders when open', panel.includes('What I remember'))
-  check('both views are reachable', panel.includes('Graph') && panel.includes('Concepts'))
 
-  // The graph is deterministic by design, so the same nodes must always
-  // produce the same coordinates — that is what makes it safe to point at
-  // during a recording.
-  const nodes = [
-    { concept_id: 'a', name: 'Reparameterization trick', understanding_score: 0.35,
-      score_confidence: 0.7, evidence_count: 2, is_weak: true, papers: ['VAE'] },
-    { concept_id: 'b', name: 'Simplified Training Objective', understanding_score: null,
-      score_confidence: null, evidence_count: 0, is_weak: false, papers: ['DDPM'] },
-  ]
-  const edges = [
-    { source: 'b', target: 'a', type: 'prerequisite_of', confidence: 0.85,
-      discovery_method: 'model' },
-  ]
-  const graphProps = { graph: { nodes, edges } }
-  const first = renderToStaticMarkup(React.createElement(ConceptGraph, graphProps))
-  const second = renderToStaticMarkup(React.createElement(ConceptGraph, graphProps))
-  check('the graph renders its nodes', first.includes('Reparameterization trick'))
-  check('the same data draws the same picture', first === second)
-  check(
-    'a cross-paper edge is drawn on the accent',
-    first.includes('stroke="var(--accent)"'),
-  )
-  check(
-    'an empty graph says so instead of drawing nothing',
-    renderToStaticMarkup(
-      React.createElement(ConceptGraph, { graph: { nodes: [], edges: [] } }),
-    ).includes('No concepts yet'),
-  )
+  // The concept graph view was removed deliberately. Its edges are still built
+  // at ingest and still drive the cross-paper callback, the memory prefetch and
+  // quiz sequencing — they are simply not drawn. Asserted rather than assumed,
+  // because "the graph came back" is the kind of thing a merge does quietly.
+  check('no graph view is offered', !panel.includes('Graph'))
+  check('no tablist is left behind', !panel.includes('role="tablist"'))
 } finally {
   await server.close()
 }

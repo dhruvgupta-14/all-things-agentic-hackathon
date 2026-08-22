@@ -13,9 +13,18 @@
 # that migrates on startup races itself the moment there is more than one
 # instance, and rolls forward a schema nobody chose to roll forward.
 #
-# DEPLOYING COSTS MONEY. --min-instances=1 keeps one instance warm, which is
-# the difference between a 15-second first question and an instant one, and is
-# billed even while idle.
+# DEPLOYING COSTS MONEY, though this configuration keeps the standing cost near
+# zero: --min-instances defaults to 0, so nothing is billed while nobody is
+# using it. The price is a cold start on the first request after an idle
+# period — container boot plus roughly 12 seconds of Vertex credential and TLS
+# handshake (see app/main.py, which pays that at startup rather than mid-turn).
+#
+# Pass --min-instances 1 before a demo to keep one instance warm. At 2 vCPU and
+# 2 GiB that is on the order of $35-50 a month, billed whether or not anyone is
+# watching, so turn it back down afterwards.
+#
+# The standing cost that does not go away is Cloud SQL, which bills 24/7
+# whether or not this service is deployed.
 
 set -euo pipefail
 
@@ -27,7 +36,7 @@ SERVICE_ACCOUNT="paper-companion"
 INSTANCE=""
 BUCKET=""
 DB_SECRET="db-app-password"
-MIN_INSTANCES="1"
+MIN_INSTANCES="0"
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -60,22 +69,20 @@ SA_EMAIL="${SERVICE_ACCOUNT}@${PROJECT}.iam.gserviceaccount.com"
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT" --format="value(projectNumber)")
 BASE_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 
-# Deliberately absent from this list:
+# This is the whole configuration — there is no second mode, so there is no
+# environment flag here saying which one to run in.
 #
-#   AUTH_DEV_BYPASS_SUBJECT   unset, not blank. The application refuses it
-#                             outside APP_ENV=local anyway, but a deployed
-#                             service should not carry the setting at all.
+# Deliberately absent:
+#
 #   RETRIEVAL_MIN_SIMILARITY  unset. Cosine scores are not comparable between
-#                             embedding models, so each embedder carries the
-#                             floor for its own vector space. One value here
-#                             would override both.
-#   DB_PASSWORD               a secret, mounted separately below.
-#
-# DB_HOST and DB_PORT are required by the settings model but unused on this
-# path: with CLOUD_SQL_INSTANCE set, the connector supplies the endpoint and
-# the DSN carries no host at all.
+#                             embedding models, so the embedder carries the
+#                             floor for its own vector space. A value here
+#                             would override it.
+#   DB_PASSWORD               a secret, mounted from Secret Manager below.
+#   DB_HOST / DB_PORT         no such settings. The Cloud SQL connector
+#                             supplies the connection and the DSN carries no
+#                             host at all.
 ENV_VARS=$(cat <<VARS | paste -sd, -
-APP_ENV=production
 FIREBASE_PROJECT_ID=$PROJECT
 VERTEX_PROJECT=$PROJECT
 VERTEX_LOCATION=global
@@ -84,8 +91,6 @@ CLOUD_SQL_INSTANCE=$INSTANCE
 CLOUD_SQL_IP_TYPE=PUBLIC
 DB_USER=app
 DB_NAME=paper_companion
-DB_HOST=unused-with-cloud-sql
-DB_PORT=5432
 CLOUD_TASKS_QUEUE=$QUEUE
 CLOUD_TASKS_LOCATION=$REGION
 SERVICE_ACCOUNT_EMAIL=$SA_EMAIL

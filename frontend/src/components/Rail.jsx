@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 
-import { IconDoc, IconMoon, IconPlus, IconSun } from './Icons'
+import { IconClose, IconDoc, IconMoon, IconPlus, IconSun } from './Icons'
 
 const STATUS = {
   queued: { label: 'Queued', tone: 'text-faint', dot: 'bg-faint animate-breathe' },
@@ -45,17 +45,32 @@ function paperLabel(paper) {
   return paper.title || paper.nickname || 'Untitled paper'
 }
 
-function PaperRow({ paper, active, onSelect }) {
+function PaperRow({ paper, active, onSelect, onRemove }) {
   const status = statusFor(paper)
   const usable = paper.processing_status === 'ready' || paper.processing_status === 'partially_ready'
 
   return (
+    <div className="group relative">
+      <button
+        type="button"
+        aria-label={`Remove ${paperLabel(paper)}`}
+        title="Remove from your library"
+        onClick={(e) => {
+          // The row behind this is the whole click target, so the event has to
+          // stop here or removing a paper also opens it.
+          e.stopPropagation()
+          onRemove(paper)
+        }}
+        className="absolute right-1.5 top-1.5 z-10 rounded p-1 text-faint opacity-0 transition-opacity duration-100 hover:bg-raised hover:text-danger focus:opacity-100 group-hover:opacity-100"
+      >
+        <IconClose className="h-3 w-3" />
+      </button>
     <button
       type="button"
       disabled={!usable}
       onClick={() => onSelect(paper)}
       className={[
-        'rail-item flex items-start gap-2',
+        'rail-item flex w-full items-start gap-2 pr-7',
         active ? 'rail-item-active' : 'rail-item-idle',
         usable ? '' : 'cursor-default opacity-70 hover:bg-transparent',
       ].join(' ')}
@@ -85,6 +100,7 @@ function PaperRow({ paper, active, onSelect }) {
         )}
       </span>
     </button>
+    </div>
   )
 }
 
@@ -114,6 +130,7 @@ export function Rail({
   activeSessionId,
   activePaperId,
   onSelectPaper,
+  onRemovePaper,
   onSelectSession,
   onNewSession,
   onUpload,
@@ -219,6 +236,7 @@ export function Rail({
                 paper={paper}
                 active={paper.paper_id === activePaperId}
                 onSelect={onSelectPaper}
+                onRemove={onRemovePaper}
               />
             ))}
             {!papers.length && !uploading && (

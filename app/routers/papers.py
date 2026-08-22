@@ -3,7 +3,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import Principal, get_current_user
@@ -37,11 +37,19 @@ def _serialize(paper: Paper, *, nickname=None, last_opened_at=None) -> dict:
         "page_count": paper.page_count,
         "unreadable_pages": paper.unreadable_pages,
         "embedding_model": paper.embedding_model,
-        # So the client can say how long a paper has been waiting. Ingestion is
-        # pushed to a queue that cannot report back that it gave up, so a paper
-        # can sit at `queued` indefinitely with no error anywhere — and an
-        # indicator that spins forever tells the reader nothing.
-        "created_at": paper.created_at.isoformat() if paper.created_at else None,
+        # So the client can say how long a paper has gone without progress.
+        # Ingestion is pushed to a queue that cannot report back that it gave
+        # up, so a paper can sit at `queued` indefinitely with no error
+        # anywhere, and an indicator that spins forever tells the reader
+        # nothing.
+        #
+        # `updated_at`, not `created_at`. A `papers` row is reused when the
+        # same bytes are uploaded again, so a retried paper carries the
+        # original creation time — which made the client call it stalled the
+        # instant it was re-queued, while it was in fact ingesting normally.
+        # A database trigger touches `updated_at` on every write, including
+        # each phase change, so this measures *no progress* rather than *age*.
+        "updated_at": paper.updated_at.isoformat() if paper.updated_at else None,
         "needs_reindex": (
             paper.processing_status in ("ready", "partially_ready")
             and paper.embedding_model != active_model
@@ -122,6 +130,55 @@ async def get_paper(
     return _serialize(paper, nickname=nickname, last_opened_at=last_opened_at)
 
 
+@router.delete("/{paper_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_paper(
+    paper_id: uuid.UUID,
+    principal: Principal = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+) -> None:
+    """Remove a paper from this reader's library.
+
+    This revokes the reader's grant (ARCHITECTURE 4.2) rather than deleting the
+    paper. Two reasons, and the first is not negotiable:
+
+    * **Papers are shared by content hash.** Phases 1-5 are paper-scoped, so
+      one `papers` row and its chunks may back several readers. Deleting it
+      because one of them tidied up would silently empty another reader's
+      library — including papers they are mid-session on.
+    * Revocation is read-time. `user_paper_access` is joined on every listing
+      and every retrieval scope, so a revoked paper disappears immediately and
+      cannot come back through a stale session.
+
+    Re-uploading the same file un-revokes the grant, which is why this is safe
+    to offer without a confirmation dialog on the server side.
+
+    Deliberately *not* done here: erasing the concepts this paper contributed
+    to the reader's graph. Those are learner memory built from several papers,
+    and dropping them would quietly undo learning history. Full erasure is a
+    separate, explicit operation (ARCHITECTURE 19, `app/services/erasure.py`).
+    """
+    grant = await session.scalar(
+        select(UserPaperAccess).where(
+            UserPaperAccess.user_id == principal.user_id,
+            UserPaperAccess.paper_id == paper_id,
+            UserPaperAccess.revoked_at.is_(None),
+        )
+    )
+
+    if grant is None:
+        # Indistinguishable from a paper that does not exist, exactly as the
+        # read route is: a 403 would confirm the id is real to someone without
+        # access.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such paper.")
+
+    grant.revoked_at = func.now()
+    await session.commit()
+    logger.info(
+        "revoked paper access",
+        extra={"paper_id": str(paper_id), "user_id": str(principal.user_id)},
+    )
+
+
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def upload_paper(
     file: UploadFile = File(...),
@@ -166,18 +223,37 @@ async def upload_paper(
     )
 
     if existing is not None:
-        # Same bytes, already parsed. Grant access and skip phases 1-5 — the
-        # chunks are paper-scoped and safely shared (ARCHITECTURE 8.4). Only
-        # phase 6b still has to run, because concepts are per-reader.
         await _grant_access(session, principal.user_id, existing.paper_id, file.filename)
+
+        if existing.processing_status == "failed":
+            # Re-uploading the file is the only recovery a reader has, and it
+            # used to do nothing: dedupe matched on content hash, granted
+            # access, enqueued canonicalization, and returned the same `failed`
+            # row. A paper that failed for a transient reason — a Vertex
+            # outage, an enqueue that was refused — was unrecoverable by the
+            # one action anybody would think to try.
+            #
+            # Re-running is safe: every phase deletes and re-inserts its own
+            # paper's rows. A permanent failure simply fails the same way
+            # again, with the same message, which is the honest outcome.
+            existing.processing_status = "queued"
+            existing.processing_phase = None
+            existing.error_code = None
+            await session.commit()
+            await _dispatch_ingestion(session, existing, principal.user_id)
+            return _serialize(existing)
+
+        # Same bytes, already parsed. Skip phases 1-5 — the chunks are
+        # paper-scoped and safely shared (ARCHITECTURE 8.4). Only phase 6b
+        # still has to run, because concepts are per-reader.
         await session.commit()
         try:
             await dispatch("canonicalize", existing.paper_id, principal.user_id)
         except TaskDispatchError:
-            # Not fatal, unlike the ingest branch below: the paper is already
-            # parsed and fully searchable, and what is lost is the reader's
-            # concept edges. Refusing the upload over that would deny access to
-            # a paper that is sitting right there, ready.
+            # Not fatal, unlike the ingest branch: the paper is already parsed
+            # and fully searchable, and what is lost is the reader's concept
+            # edges. Refusing the upload over that would deny access to a paper
+            # that is sitting right there, ready.
             logger.error(
                 "canonicalization not scheduled",
                 extra={"paper_id": str(existing.paper_id)},
@@ -200,8 +276,20 @@ async def upload_paper(
     await _grant_access(session, principal.user_id, paper.paper_id, file.filename)
     await session.commit()
 
+    await _dispatch_ingestion(session, paper, principal.user_id)
+    return _serialize(paper)
+
+
+async def _dispatch_ingestion(
+    session: AsyncSession, paper: Paper, user_id: uuid.UUID
+) -> None:
+    """Enqueue ingestion, or leave the paper in a state the reader can see.
+
+    Shared by the new-paper and retry-a-failed-paper paths so they cannot drift
+    into handling a refused enqueue differently.
+    """
     try:
-        await dispatch("ingest", paper.paper_id, principal.user_id)
+        await dispatch("ingest", paper.paper_id, user_id)
     except TaskDispatchError:
         # The paper row is already committed, so doing nothing here would leave
         # it `queued` forever — the exact silent stall this dispatch path was
@@ -216,8 +304,6 @@ async def upload_paper(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Could not schedule processing. Please try again.",
         ) from None
-
-    return _serialize(paper)
 
 
 async def _grant_access(

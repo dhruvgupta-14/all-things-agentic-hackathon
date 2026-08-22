@@ -102,7 +102,7 @@ Resources created:
 IAM bindings:
   - gs://$BUCKET  -> roles/storage.objectAdmin  (bucket-scoped, not project-wide)
 $(printf "  - project $PROJECT -> %s\n" "${PROJECT_ROLES[@]}")
-  - $SA_EMAIL -> roles/iam.serviceAccountTokenCreator (on itself, for OIDC)
+  - $SA_EMAIL -> roles/iam.serviceAccountUser (on itself: actAs, for OIDC pushes)
 $(if [[ -n "$CLOUD_RUN_SERVICE" ]]; then
     echo "  - run service $CLOUD_RUN_SERVICE -> roles/run.invoker"
   else
@@ -307,12 +307,21 @@ for role in "${PROJECT_ROLES[@]}"; do
   fi
 done
 
-# The queue needs to mint OIDC tokens as the service account to push to the
-# private /internal/ingest route.
+# Enqueuing a task that carries an OIDC token means asking Cloud Tasks to act
+# *as* the service account named in that token, so the caller needs
+# `iam.serviceAccounts.actAs` on it — which lives in roles/iam.serviceAccountUser.
+#
+# This used to grant roles/iam.serviceAccountTokenCreator, the role for
+# *minting* tokens, which does not include actAs. Nothing caught it until the
+# first upload against a real deployment: every earlier enqueue had been run
+# under an owner's own credentials, and owners hold actAs implicitly.
+#
+#   PermissionDenied: 403 The principal lacks IAM permission
+#   "iam.serviceAccounts.actAs" for the resource "paper-companion@..."
 run gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
   --project "$PROJECT" \
   --member "serviceAccount:$SA_EMAIL" \
-  --role roles/iam.serviceAccountTokenCreator \
+  --role roles/iam.serviceAccountUser \
   --quiet
 
 # ---------------------------------------------------------------------------

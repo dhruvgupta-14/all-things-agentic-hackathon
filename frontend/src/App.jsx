@@ -49,7 +49,7 @@ export default function App() {
 }
 
 export function Workspace({ theme, onToggleTheme, user, onSignOut }) {
-  const { papers, upload, uploading } = usePapers()
+  const { papers, upload, uploading, remove } = usePapers()
   const { sessions, refresh: refreshSessions, create } = useSessions()
 
   const [sessionId, setSessionId] = useState(null)
@@ -84,6 +84,26 @@ export function Workspace({ theme, onToggleTheme, user, onSignOut }) {
     [sessions, create],
   )
 
+  const removePaper = useCallback(
+    async (paper) => {
+      // Asked here rather than on the server: removal is reversible — the same
+      // file re-uploaded restores the grant — but it is still not something to
+      // do on a mis-click next to the row's own click target.
+      const label = paper.title || paper.nickname || 'this paper'
+      if (!window.confirm(`Remove ${label} from your library?`)) return
+      await remove(paper.paper_id)
+      // Any session pointed at it now has an empty scope, so stop showing it
+      // as the open conversation.
+      setSessionId((current) =>
+        sessions.find((s) => s.session_id === current)?.active_paper_id ===
+        paper.paper_id
+          ? null
+          : current,
+      )
+    },
+    [remove, sessions],
+  )
+
   const startBlankSession = useCallback(async () => {
     const created = await create(null)
     setSessionId(created.session_id)
@@ -109,6 +129,7 @@ export function Workspace({ theme, onToggleTheme, user, onSignOut }) {
         activeSessionId={sessionId}
         activePaperId={session?.active_paper_id ?? null}
         onSelectPaper={openSessionForPaper}
+        onRemovePaper={removePaper}
         onSelectSession={(s) => setSessionId(s.session_id)}
         onNewSession={startBlankSession}
         onUpload={upload}

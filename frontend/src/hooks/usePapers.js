@@ -8,21 +8,27 @@ import { api } from '../api/client'
 const TERMINAL = new Set(['ready', 'partially_ready', 'failed'])
 const POLL_MS = 2500
 
-// After this long, a paper that is still `queued` is not slow — something has
-// gone wrong that nothing will report. Cloud Tasks retries the ingestion push
-// five times and then drops the task, and it has no way to tell the
-// application it gave up: the row simply stays `queued` forever, with no error
-// recorded anywhere. A spinner that never stops says nothing; this turns the
-// silence into a statement.
+// After this long with no write to the row at all, a paper is not slow —
+// something has gone wrong that nothing will report. Cloud Tasks retries the
+// ingestion push five times and then drops the task, and it has no way to tell
+// the application it gave up: the row simply stays `queued` forever, with no
+// error recorded anywhere. A spinner that never stops says nothing; this turns
+// the silence into a statement.
 //
 // Three minutes is comfortably past a normal ingest (30-60s for a 20-page
 // paper) and past the queue's own retry window.
 const STALLED_AFTER_MS = 3 * 60 * 1000
 
+// `updated_at`, not `created_at`, and the difference is not academic: a
+// `papers` row is reused when the same bytes are uploaded again, so a retried
+// paper carries a creation time from whenever it was first seen. Timing from
+// that reported "Not processing" the moment a retry was queued — on a paper
+// that was ingesting perfectly well. A trigger touches `updated_at` on every
+// write, phase changes included, so this measures a lack of progress.
 function withStalled(paper) {
-  if (TERMINAL.has(paper.processing_status) || !paper.created_at) return paper
-  const waited = Date.now() - new Date(paper.created_at).getTime()
-  return waited > STALLED_AFTER_MS ? { ...paper, stalled: true } : paper
+  if (TERMINAL.has(paper.processing_status) || !paper.updated_at) return paper
+  const since = Date.now() - new Date(paper.updated_at).getTime()
+  return since > STALLED_AFTER_MS ? { ...paper, stalled: true } : paper
 }
 
 export function usePapers() {
@@ -78,5 +84,21 @@ export function usePapers() {
     [refresh],
   )
 
-  return { papers, loading, error, uploading, refresh, upload }
+  const remove = useCallback(
+    async (paperId) => {
+      // Dropped from the list before the request returns. Revocation cannot
+      // fail in a way that leaves the paper usable — a 404 means it was
+      // already gone — and waiting on a round trip to hide a row the reader
+      // just dismissed reads as an unresponsive UI.
+      setPapers((current) => current.filter((p) => p.paper_id !== paperId))
+      try {
+        await api.removePaper(paperId)
+      } finally {
+        await refresh()
+      }
+    },
+    [refresh],
+  )
+
+  return { papers, loading, error, uploading, refresh, upload, remove }
 }

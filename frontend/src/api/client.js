@@ -85,6 +85,10 @@ export const api = {
     body.append('file', file)
     return request('/api/papers', { method: 'POST', body })
   },
+  // Removes the paper from this reader's library by revoking their grant. The
+  // paper itself survives — it may be shared with other readers by content
+  // hash — and re-uploading the same file brings it back.
+  removePaper: (paperId) => request(`/api/papers/${paperId}`, { method: 'DELETE' }),
 
   listSessions: () => request('/api/sessions'),
   createSession: (paperId) =>

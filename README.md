@@ -1,7 +1,231 @@
 # Research Paper Reading Companion
 
-FastAPI + Google ADK agent over Cloud SQL/pgvector. See the architecture
-document for the design; this file covers running and operating it.
+Upload a research paper, ask questions about it, and get answers where **every
+citation is a passage the system actually retrieved** - not a marker the model
+invented. It tracks which concepts you have met across papers, so it can point
+out that an idea in one paper is the same one you saw in another.
+
+A single FastAPI service on Cloud Run serves both the React SPA and the API,
+backed by one Google ADK agent on Gemini 3.5 Flash, with Cloud SQL + pgvector
+holding both the paper index and the reader's concept graph.
+
+## Live demo
+
+| | |
+| --- | --- |
+| **URL** | <https://paper-companion-929850602194.us-central1.run.app> |
+| **Email** | `judge@research-companion.demo` |
+| **Password** | `judge123` |
+
+The account already has two ingested papers and a concept graph with 28
+cross-paper edges, so the callback behaviour is demonstrable immediately. Sign
+in, open a paper, and ask it something.
+
+> The first question after an idle period takes roughly 12 extra seconds. The
+> service runs at `--min-instances 0`, so it pays the Vertex AI credential
+> handshake on a cold start rather than being billed to sit warm.
+
+## What it does
+
+* **Grounded answers.** A citation is a `turn_retrievals` row with
+  `was_cited = true`. Markers pointing at anything not retrieved for that turn
+  are stripped before the first token reaches the browser.
+* **Scoped retrieval.** The set of papers a turn may search is injected
+  server-side through ADK's `before_tool_callback`, so the model cannot widen
+  its own access regardless of what a paper tells it to do.
+* **Cross-paper memory.** Concepts are canonicalised per reader and linked by
+  an adjudicated graph. Those edges drive the callback, the memory prefetch and
+  quiz prerequisite ordering.
+* **Durable ingestion.** Uploads are pushed to Cloud Tasks and processed by an
+  OIDC-authenticated internal route, so a job survives the instance being
+  reclaimed mid-run.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    U([Reader])
+    FB["Firebase Auth<br/>email + password"]
+
+    subgraph RUN["Cloud Run - ONE service, one origin"]
+        SPA["React SPA<br/>served from the same origin as the API"]
+        subgraph DET["Deterministic code"]
+            AUTH["Verify Firebase ID token, resolve user_id"]
+            SCOPE["Authorization: user_paper_access grants"]
+            PIPE["TurnPipeline: route, prefetch, verify, persist"]
+            CV["CitationVerifier: sets was_cited"]
+            ING["IngestionPipeline: parse, chunk, embed, canonicalise"]
+        end
+        subgraph MZ["Model zone"]
+            ADK["Google ADK Runner<br/>one agent, 5 scoped tools"]
+        end
+    end
+
+    subgraph DATA["Data"]
+        PG[("Cloud SQL - Postgres 16 + pgvector<br/>papers, chunks, concepts, turns")]
+        GCS[("Cloud Storage<br/>private PDFs")]
+        SM[("Secret Manager<br/>database password")]
+    end
+
+    CT["Cloud Tasks<br/>ingestion queue"]
+    GEM["Vertex AI<br/>Gemini 3.5 Flash, gemini-embedding-001"]
+
+    U --> SPA
+    FB -.->|ID token| SPA
+    SPA -->|HTTPS, SSE| AUTH
+    AUTH -->|verify| FB
+    AUTH --> SCOPE --> PIPE
+    PIPE -->|scope injected via before_tool_callback| ADK
+    ADK <-->|reasoning and tool calls| GEM
+    ADK -->|tools read only in-scope rows| PG
+    PIPE --> CV --> PG
+    PIPE -.->|enqueue| CT
+    CT -.->|OIDC push to /internal/ingest| ING
+    ING --> GCS
+    ING -->|batch embed| GEM
+    ING --> PG
+    RUN -.->|read at boot| SM
+```
+
+The load-bearing detail: **Gemini never reaches the database directly.** Tools
+run inside deterministic code that applies the caller's grants first, and the
+answer's citations are checked against what those tools returned before any
+text is streamed.
+
+## Deploy to Google Cloud
+
+Roughly twenty minutes, most of it waiting for Cloud SQL. Every step is either
+scripted or a single command.
+
+**Prerequisites:** `gcloud`, Python 3.12+, Node 22+, a GCP project with billing
+enabled, and Firebase Authentication with the **Email/Password** provider
+turned on for that project.
+
+```bash
+gcloud auth application-default login
+export PROJECT=<your-project-id>
+```
+
+### 1. Provision the bucket, queue, service account and IAM
+
+Idempotent, and `--manifest` prints the plan without touching anything.
+
+```bash
+./scripts/provision_gcp.sh --project $PROJECT --manifest   # review first
+./scripts/provision_gcp.sh --project $PROJECT
+```
+
+### 2. Create Cloud SQL
+
+Deliberately not scripted: it is the expensive, long-lived resource and wants a
+deliberate choice of tier.
+
+```bash
+gcloud sql instances create paper-companion \
+  --project $PROJECT --region us-central1 \
+  --database-version POSTGRES_16 --edition ENTERPRISE \
+  --tier db-g1-small --storage-size 10GB --storage-type SSD \
+  --storage-auto-increase \
+  --database-flags random_page_cost=1.1
+
+gcloud sql databases create paper_companion --instance paper-companion --project $PROJECT
+gcloud sql users create app --instance paper-companion --project $PROJECT --password '<generate one>'
+```
+
+`random_page_cost=1.1` is not optional tuning. Postgres defaults it to 4.0, a
+spinning-disk figure, and the planner then answers vector queries with a
+sequential scan instead of the HNSW index - measured at 183ms against 1ms on a
+5 000-chunk corpus.
+
+### 3. Put the database password in Secret Manager
+
+The deploy mounts it from there, so it is never in the repository and never in
+a shell variable you have to remember to clear.
+
+```bash
+printf '%s' '<the password from step 2>' \
+  | gcloud secrets create db-app-password --project $PROJECT \
+      --replication-policy automatic --data-file=-
+
+gcloud secrets add-iam-policy-binding db-app-password --project $PROJECT \
+  --member "serviceAccount:paper-companion@$PROJECT.iam.gserviceaccount.com" \
+  --role roles/secretmanager.secretAccessor
+```
+
+### 4. Fill in `.env`
+
+Copy `.env.example` and set every value. Each one is required and the process
+refuses to start without it, naming the missing setting.
+
+`SERVICE_BASE_URL` is this service's own Cloud Run URL. It is deterministic -
+service name, project number, region - so it can be set before the first
+deploy: `https://paper-companion-<project-number>.us-central1.run.app`. It is
+also the OIDC audience Cloud Tasks signs for, so a wrong value means every
+ingestion push is refused with a 401.
+
+### 5. Apply the schema
+
+Cloud Run does not run migrations. This is a deliberate step before deploying a
+revision that needs them.
+
+```bash
+python -m alembic upgrade head
+```
+
+Creates the `vector` extension, 16 tables, the HNSW indexes, and the
+append-only triggers on `turns`, `observations` and `quiz_attempts`.
+
+### 6. Build and deploy
+
+Cloud Build compiles the SPA and the image from the `Dockerfile`. The script
+derives the service URL, wires the Cloud SQL connector and mounts the secret.
+
+```bash
+./scripts/deploy_cloud_run.sh --project $PROJECT --dry-run   # review first
+./scripts/deploy_cloud_run.sh --project $PROJECT
+```
+
+Pass `--min-instances 1` to keep one instance warm before a demo, and set it
+back to `0` afterwards - a warm 2 vCPU / 2 GiB instance is billed whether or
+not anyone is using it.
+
+### 7. Verify
+
+Each step exercises strictly more of the system than the one before it.
+
+```bash
+curl -s https://paper-companion-<project-number>.us-central1.run.app/health
+# {"status":"ok","database":"ok"}   <- the container reached Cloud SQL
+```
+
+Then open the URL, sign in, and upload a PDF. Watching it move
+`Queued -> Processing -> Ready` proves Cloud Tasks, the OIDC push route, Cloud
+Storage, Cloud SQL and Vertex AI all work together. If it stays `Queued`, the
+push is being refused - the logs say why:
+
+```bash
+gcloud run services logs read paper-companion --region us-central1 --project $PROJECT
+```
+
+### 8. Optional: seed a demo account
+
+Gives an account papers, concepts and enough learner memory for the cross-paper
+callback to fire, without re-ingesting anything.
+
+```bash
+PYTHONPATH=. python scripts/seed_demo_account.py --email <account@example.com>
+```
+
+### Check the configuration before deploying
+
+```bash
+PYTHONPATH=. python scripts/preflight_deploy.py
+```
+
+Read-only and makes no API calls. Every check corresponds to something that has
+already gone wrong once here - the `VERTEX_LOCATION` one in particular, because
+a deployment that quietly falls back to `gemini-2.5-flash` still starts, still
+answers and still cites correctly, on a model the submission does not claim.
 
 ## There is no local mode
 
@@ -18,7 +242,7 @@ with nothing real behind any of it.
 Running on `localhost` is still normal and supported. It is an **address, not a
 mode**: the same settings, the same Firebase login, the same database.
 
-## Setup
+## Run it locally
 
 ```bash
 python -m venv venv
@@ -108,24 +332,18 @@ untouched rather than degrading a working one, and a second `--stale` run finds
 nothing. Re-indexing deliberately does not re-run per-reader concept
 canonicalization — it is a vector operation, not a learner-model one.
 
-## Cloud provisioning
+## What provisioning creates
 
-```bash
-./scripts/provision_gcp.sh --project <project> --dry-run   # review first
-./scripts/provision_gcp.sh --project <project>
-```
+`scripts/provision_gcp.sh` (step 1 of the deploy guide) is idempotent and
+non-destructive: every step checks before creating. It makes the bucket
+(private, uniform access, public-access-prevention), the Cloud Tasks queue and
+the service account, and binds least-privilege IAM — `storage.objectAdmin`
+scoped to the bucket rather than project-wide, plus `cloudtasks.enqueuer`,
+`aiplatform.user`, `cloudsql.client`, and `iam.serviceAccountUser` on itself so
+the queue may mint OIDC tokens as that identity.
 
-Idempotent and non-destructive: every step checks before creating. It sets up
-the bucket (private, uniform access, public-access-prevention), the Cloud Tasks
-queue, the service account and least-privilege IAM, then prints the staging
-env block. It deliberately does not create Cloud SQL or download a
-service-account key — see the notes it prints.
-
-**When you create Cloud SQL, set the `random_page_cost` database flag to 1.1.**
-The default of 4.0 is a spinning-disk figure and makes the planner answer
-vector queries with a sequential scan instead of the HNSW index. Measured on a
-5 000-chunk corpus: 183ms sequential vs 1ms indexed. The app also sets this
-per-connection, so this is belt and braces.
+It deliberately does not create Cloud SQL, and never downloads a service-account
+key — application default credentials cover every path.
 
 ## Retrieval benchmark
 

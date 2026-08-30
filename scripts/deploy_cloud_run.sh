@@ -13,15 +13,17 @@
 # that migrates on startup races itself the moment there is more than one
 # instance, and rolls forward a schema nobody chose to roll forward.
 #
-# DEPLOYING COSTS MONEY, though this configuration keeps the standing cost near
-# zero: --min-instances defaults to 0, so nothing is billed while nobody is
-# using it. The price is a cold start on the first request after an idle
-# period — container boot plus roughly 12 seconds of Vertex credential and TLS
-# handshake (see app/main.py, which pays that at startup rather than mid-turn).
+# DEPLOYING COSTS MONEY, and --min-instances now defaults to **1** so the
+# service is judged without a cold start. One warm 2 vCPU / 2 GiB instance is on
+# the order of $35-50 a month, billed whether or not anyone is using it.
 #
-# Pass --min-instances 1 before a demo to keep one instance warm. At 2 vCPU and
-# 2 GiB that is on the order of $35-50 a month, billed whether or not anyone is
-# watching, so turn it back down afterwards.
+# The default is 1 rather than 0 deliberately: a redeploy would otherwise reset
+# a warmed service back to cold without anyone noticing until the next demo.
+# Pass --min-instances 0 once judging is over.
+#
+# What a cold start costs, for reference: container boot plus roughly 12 seconds
+# of Vertex credential and TLS handshake (see app/main.py, which pays that at
+# startup rather than in the middle of someone's first question).
 #
 # The standing cost that does not go away is Cloud SQL, which bills 24/7
 # whether or not this service is deployed.
@@ -36,7 +38,7 @@ SERVICE_ACCOUNT="paper-companion"
 INSTANCE=""
 BUCKET=""
 DB_SECRET="db-app-password"
-MIN_INSTANCES="0"
+MIN_INSTANCES="1"
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do

@@ -14,16 +14,29 @@ holding both the paper index and the reader's concept graph.
 | | |
 | --- | --- |
 | **URL** | <https://paper-companion-929850602194.us-central1.run.app> |
-| **Email** | `judge@research-companion.demo` |
-| **Password** | `judge123` |
+| **Email** | `user2@demo.com` |
+| **Password** | `user123` |
 
-The account already has two ingested papers and a concept graph with 28
-cross-paper edges, so the callback behaviour is demonstrable immediately. Sign
-in, open a paper, and ask it something.
+The account starts empty, on purpose - the upload path is part of what there is
+to see. Sign in, drag a PDF into the left panel, and watch it move through
+`Queued -> Processing -> Ready` as the six-phase pipeline runs: parse, section,
+chunk, embed, extract concepts, link them into your graph. Thirty to sixty
+seconds for a typical paper.
 
-> The first question after an idle period takes roughly 12 extra seconds. The
-> service runs at `--min-instances 0`, so it pays the Vertex AI credential
-> handshake on a cold start rather than being billed to sit warm.
+Then open it and ask a question. Every citation in the answer is clickable and
+opens the passage it came from.
+
+Upload a **second** related paper to see the part that is harder to fake:
+concepts are canonicalised per reader rather than per document, so an idea
+appearing in both papers becomes one entry in **What I remember** with both
+papers listed against it.
+
+> One instance is kept warm, so there is no cold start. Answers still take
+> around 30 seconds: a turn is several model calls plus retrieval, streamed as
+> it is produced.
+
+**Questions, or something not working?** Reach me at
+<dhruvpahariya692@gmail.com>.
 
 ## What it does
 
